@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Editor backup / temp files
+*.bak
+*.tmp
+*.swp
+
+# Local plan/cache artifacts that might land here by accident
+/tmp/
+cg-actions-plan.json
+cg-actions-adoption.patch
