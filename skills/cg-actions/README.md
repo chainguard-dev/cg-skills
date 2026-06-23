@@ -6,7 +6,7 @@ A Claude Code skill for auditing GitHub Actions usage and migrating to
 ## Install
 
 The recommended way to install is the **hardened** build, distributed through
-[Chainguard Agent Skills](https://www.chainguard.dev/):
+[Chainguard Agent Skills](https://www.chainguard.dev/agent-skills):
 
 ```
 chainctl skills install skills.cgr.dev/chainguard/chainguard-dev/cg-actions:latest
