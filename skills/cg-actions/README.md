@@ -28,7 +28,9 @@ the skill checks for this and stops rather than guessing.
 the skill runs `scripts/check_version.py`, which compares it to the latest
 published in [chainguard-dev/cg-skills](https://github.com/chainguard-dev/cg-skills)
 (`skills/cg-actions/VERSION`) and suggests updating if you're behind. To update,
-download the latest from <https://github.com/chainguard-dev/cg-skills>.
+re-run the install command above — `chainctl skills install
+skills.cgr.dev/chainguard/chainguard-dev/cg-actions:latest` pulls the newest
+hardened build (or pin a specific version tag for a reproducible install).
 Maintainers: bump `VERSION` whenever you change the skill so installs can detect it.
 
 ---
