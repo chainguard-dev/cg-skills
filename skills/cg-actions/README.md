@@ -3,6 +3,22 @@
 A Claude Code skill for auditing GitHub Actions usage and migrating to
 [Chainguard hardened actions](https://github.com/chainguard-actions).
 
+## Install
+
+The recommended way to install is the **hardened** build, distributed through
+[Chainguard Agent Skills](https://www.chainguard.dev/):
+
+```
+chainctl skills install skills.cgr.dev/chainguard/chainguard-dev/cg-actions:latest
+```
+
+This pulls the skill from the Chainguard registry (`skills.cgr.dev`) — built,
+signed, and continuously maintained the same way as Chainguard's other hardened
+artifacts. Pin a specific version instead of `:latest` if you want reproducible
+installs.
+
+---
+
 **Requires an environment that can run scripts and call the GitHub API** — i.e.
 Claude Code (or another agent with a shell tool) plus `gh` authenticated
 (`gh auth login`). It does **not** work in a plain claude.ai chat with no shell;
