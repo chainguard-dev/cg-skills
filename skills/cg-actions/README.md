@@ -8,6 +8,20 @@ Claude Code (or another agent with a shell tool) plus `gh` authenticated
 (`gh auth login`). It does **not** work in a plain claude.ai chat with no shell;
 the skill checks for this and stops rather than guessing.
 
+---
+
+## Installation
+
+Install with [`chainctl`](https://edu.chainguard.dev/chainguard/chainctl/how-to-install-chainctl/):
+
+```
+chainctl skills install skills.cgr.dev/chainguard/chainguard-dev/cg-actions:latest
+```
+
+See the [chainctl install docs](https://edu.chainguard.dev/chainguard/chainctl/how-to-install-chainctl/) if you don't have `chainctl` yet.
+
+---
+
 **Version / updates.** The installed version is in [VERSION](VERSION). At startup
 the skill runs `scripts/check_version.py`, which compares it to the latest
 published in [chainguard-dev/cg-skills](https://github.com/chainguard-dev/cg-skills)
