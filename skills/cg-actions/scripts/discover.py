@@ -32,6 +32,7 @@ Usage:
     python3 discover.py owner/repo1 owner/repo2             > inventory.json
     python3 discover.py --org myorg                         > inventory.json
     python3 discover.py owner/repo --version-strategy latest > inventory.json
+    python3 discover.py owner/repo --pin tag                 > inventory.json  # tag, not SHA
     python3 discover.py --actions-list actions.txt          > inventory.json
     python3 discover.py --actions-list -                    > inventory.json
     echo "actions/checkout@v4" | python3 discover.py --actions-list -
@@ -204,33 +205,110 @@ def _is_public_action_repo(candidate):
     return meta.get("private") is False and not meta.get("archived", False)
 
 
+_REPO_INDEX = None  # lowercased repo name -> actual repo name (public, non-archived)
+
+
+def _public_repo_index():
+    """
+    Build (once) an index of every PUBLIC, non-archived chainguard-actions repo.
+
+    Returns {lowercased_name: actual_name}, or None if the org listing could not
+    be fetched (callers then fall back to per-candidate lookups). Matching against
+    this index — rather than guessing exact names — is what makes mirror lookup
+    resilient to naming variations (case differences, subpaths) so a public mirror
+    isn't reported as "no equivalent" just because our guess didn't match exactly.
+    """
+    global _REPO_INDEX
+    if _REPO_INDEX is not None:
+        return _REPO_INDEX or None
+    r = _gh("--paginate", "orgs/chainguard-actions/repos?per_page=100",
+            "--jq", ".[] | select(.archived==false and .private==false) | .name",
+            check=False)
+    if r.returncode != 0 or not r.stdout.strip():
+        _REPO_INDEX = {}          # cache the failure; signal "unavailable"
+        return None
+    _REPO_INDEX = {n.strip().lower(): n.strip() for n in r.stdout.splitlines() if n.strip()}
+    return _REPO_INDEX
+
+
+def _fetch_tags(cg_repo):
+    r = _gh(f"repos/{cg_repo}/tags", "--paginate", "--jq", ".[].name", check=False)
+    if r.returncode == 0 and r.stdout.strip():
+        return sorted(
+            [t.strip() for t in r.stdout.splitlines() if t.strip()],
+            key=_tag_sort_key, reverse=True,
+        )
+    return []
+
+
+def _candidate_names(action_name):
+    """Mirror-name candidates for an upstream action, most specific first.
+
+    `owner/repo` -> ["owner-repo", "repo"]; a subpath (`owner/repo/sub`) resolves
+    on the repo, dropping the subpath.
+    """
+    parts = [p for p in action_name.split("/") if p]
+    if len(parts) < 2:
+        return []
+    owner, repo = parts[0], parts[1]
+    return [f"{owner}-{repo}", repo]
+
+
 def get_hardened_tags(action_name):
     """
-    Look up the Chainguard hardened equivalent of action_name via gh API.
+    Look up the Chainguard hardened equivalent of action_name.
 
-    Naming convention: chainguard-actions/{owner}-{repo} (primary),
-    then chainguard-actions/{repo} (fallback).
-
-    Only PUBLIC, non-archived chainguard-actions repos are accepted — private or
-    in-development repos are never recommended (see _is_public_action_repo).
+    Resolves the mirror name (`{owner}-{repo}`, then `{repo}`) against an index of
+    all PUBLIC, non-archived chainguard-actions repos — case-insensitively and with
+    subpath handling — so public mirrors are found even when the exact name differs
+    from a naive guess. Private / in-development repos are never in the index, so
+    they are never recommended. Falls back to a direct per-candidate check if the
+    org index can't be fetched.
 
     FUTURE: replace with chainctl actions catalog list lookup
     (see module docstring piece 1).
     """
     if "/" not in action_name:
         return None, []
-    owner, repo = action_name.split("/", 1)
-    for candidate in [f"chainguard-actions/{owner}-{repo}", f"chainguard-actions/{repo}"]:
-        if not _is_public_action_repo(candidate):
-            continue
-        r = _gh(f"repos/{candidate}/tags", "--paginate", "--jq", ".[].name", check=False)
-        if r.returncode == 0 and r.stdout.strip():
-            tags = sorted(
-                [t.strip() for t in r.stdout.splitlines() if t.strip()],
-                key=_tag_sort_key, reverse=True,
-            )
-            return candidate, tags
+    candidates = _candidate_names(action_name)
+
+    index = _public_repo_index()
+    if index is not None:
+        for cand in candidates:
+            real = index.get(cand.lower())
+            if real:
+                tags = _fetch_tags(f"chainguard-actions/{real}")
+                if tags:
+                    return f"chainguard-actions/{real}", tags
+        return None, []
+
+    # Index unavailable (e.g. org listing failed): fall back to per-candidate checks.
+    for cand in candidates:
+        full = f"chainguard-actions/{cand}"
+        if _is_public_action_repo(full):
+            tags = _fetch_tags(full)
+            if tags:
+                return full, tags
     return None, []
+
+
+_SHA_CACHE = {}
+
+
+def get_commit_sha(cg_repo, tag):
+    """Resolve the commit SHA a tag points to (dereferenced), or None.
+
+    SHA-pinning to the commit a tag resolves to is the GitHub Actions hardening
+    best practice: the pin is immutable even if the tag is later moved.
+    """
+    key = (cg_repo, tag)
+    if key in _SHA_CACHE:
+        return _SHA_CACHE[key]
+    r = _gh(f"repos/{cg_repo}/commits/{tag}", "--jq", ".sha", check=False)
+    sha = r.stdout.strip() if r.returncode == 0 else ""
+    sha = sha if re.fullmatch(r"[0-9a-f]{40}", sha or "") else None
+    _SHA_CACHE[key] = sha
+    return sha
 
 
 def _tag_sort_key(tag):
@@ -338,7 +416,7 @@ def parse_actions_list(content):
 # Inventory emission
 # ---------------------------------------------------------------------------
 
-def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, resolve_action):
+def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, pin, resolve_action):
     """Resolve each discovered action against the catalog and print inventory.json.
 
     Resolution is PER DISTINCT VERSION: the same action used at two majors (e.g.
@@ -360,10 +438,12 @@ def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, resolve_ac
             v = o.get("version") or o.get("ref") or None
             if v not in ver_cache:
                 ver_cache[v] = resolve_action(name, v)
-            ha, hr, hn = ver_cache[v]
+            ha, hr, hn, htag, hsha = ver_cache[v]
             o["hardened_available"] = ha
             o["hardened_ref"] = hr
             o["hardened_note"] = hn
+            o["hardened_tag"] = htag
+            o["hardened_sha"] = hsha
 
         # Aggregate to action level.
         statuses = {o["hardened_available"] for o in occ}
@@ -371,17 +451,23 @@ def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, resolve_ac
             agg_status = next(iter(statuses))
             agg_ref = occ[0]["hardened_ref"]
             agg_note = occ[0]["hardened_note"]
+            agg_tag = occ[0]["hardened_tag"]
+            agg_sha = occ[0]["hardened_sha"]
         else:
             agg_status = "mixed"
-            agg_ref = None
-            # One line per distinct version, e.g. "v4 → version-gap; v6 → available".
+            agg_ref = agg_tag = agg_sha = None
+            # One line per distinct version, e.g. "v4 → version gap; v6 → available".
+            labels = {True: "available", "version-gap": "version gap",
+                      "already-hardened": "already hardened", False: "no equivalent",
+                      None: "not checked"}
             seen, parts = set(), []
             for o in occ:
                 v = o.get("version") or o.get("ref") or "(unspecified)"
                 if v in seen:
                     continue
                 seen.add(v)
-                parts.append(f"{v} → {o['hardened_available']}")
+                ha = o["hardened_available"]
+                parts.append(f"{v} → {labels.get(ha, ha)}")
             agg_note = "varies by version: " + "; ".join(parts)
 
         actions.append({
@@ -389,6 +475,8 @@ def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, resolve_ac
             "occurrences": occ,
             "hardened_available": agg_status,
             "hardened_ref": agg_ref,
+            "hardened_tag": agg_tag,
+            "hardened_sha": agg_sha,
             "hardened_note": agg_note,
         })
 
@@ -397,6 +485,7 @@ def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, resolve_ac
         "org": org_label,
         "generated_by": generated_by,
         "version_strategy": strategy,
+        "pin": pin,
         "actions": actions,
     }, indent=2))
     return 0
@@ -426,21 +515,45 @@ def main(argv=None):
         help="same-major (default): prefer latest hardened tag within the same major. "
              "latest: always use the newest hardened tag (may involve a major jump).",
     )
+    ap.add_argument(
+        "--pin",
+        choices=["sha", "tag"],
+        default="sha",
+        help="How to pin hardened refs. sha (default): commit-SHA pin with a "
+             "'# vX.Y.Z' comment (the GitHub Actions hardening best practice). "
+             "tag: a movable version tag (more readable, less secure).",
+    )
     args = ap.parse_args(argv)
     strategy = args.version_strategy
+    pin = args.pin
 
     catalog_cache = {}
 
     def resolve_action(name, upstream_ref):
+        """Returns (status, hardened_ref, note, hardened_tag, hardened_sha)."""
         # Already a Chainguard hardened action — no swap to recommend.
         if name.startswith("chainguard-actions/"):
-            return "already-hardened", None, "Already a Chainguard hardened action — no change needed"
+            return ("already-hardened", None,
+                    "Already a Chainguard hardened action — no change needed", None, None)
         if name not in catalog_cache:
             catalog_cache[name] = get_hardened_tags(name)
         cg_repo, tags = catalog_cache[name]
         if cg_repo is None:
-            return False, None, None
-        return resolve_version(cg_repo, tags, upstream_ref, strategy)
+            return False, None, None, None, None
+
+        status, tag_ref, note = resolve_version(cg_repo, tags, upstream_ref, strategy)
+        if not tag_ref:
+            return status, None, note, None, None
+
+        cg, tag = tag_ref.split("@", 1)
+        sha = None
+        if pin == "sha":
+            sha = get_commit_sha(cg, tag)
+        if sha:
+            ref = f"{cg}@{sha} # {tag}"   # immutable pin + human version
+        else:
+            ref = f"{cg}@{tag}"           # tag mode, or SHA lookup failed
+        return status, ref, note, tag, sha
 
     # --- LIST MODE ---
     if args.actions_list:
@@ -457,16 +570,19 @@ def main(argv=None):
         print(f"Resolving {len(action_list)} action(s) from list...", file=sys.stderr)
         actions = []
         for name, ref in action_list:
-            ha, hr, hn = resolve_action(name, ref or None)
+            ha, hr, hn, htag, hsha = resolve_action(name, ref or None)
             occ = ([{"repo": "(input list)", "workflow": "(input list)",
                      "ref": ref, "version": ref, "line": None,
-                     "hardened_available": ha, "hardened_ref": hr, "hardened_note": hn}]
+                     "hardened_available": ha, "hardened_ref": hr, "hardened_note": hn,
+                     "hardened_tag": htag, "hardened_sha": hsha}]
                    if ref else [])
             actions.append({
                 "name": name,
                 "occurrences": occ,
                 "hardened_available": ha,
                 "hardened_ref": hr,
+                "hardened_tag": htag,
+                "hardened_sha": hsha,
                 "hardened_note": hn,
             })
 
@@ -475,6 +591,7 @@ def main(argv=None):
             "org": None,
             "generated_by": "actions-list",
             "version_strategy": strategy,
+            "pin": pin,
             "actions": actions,
         }, indent=2))
         return 0
@@ -498,7 +615,7 @@ def main(argv=None):
             )
         return _emit_inventory(raw, scope="repo", org_label=None,
                                generated_by="local-scan", strategy=strategy,
-                               resolve_action=resolve_action)
+                               pin=pin, resolve_action=resolve_action)
 
     # --- PRIMARY MODE: repo/org scanning ---
     repos = list(args.repos)
@@ -522,7 +639,7 @@ def main(argv=None):
 
     return _emit_inventory(raw, scope=("org" if args.org else "repo"),
                            org_label=org_label, generated_by="gh-api-scan",
-                           strategy=strategy, resolve_action=resolve_action)
+                           strategy=strategy, pin=pin, resolve_action=resolve_action)
 
 if __name__ == "__main__":
     raise SystemExit(main())
