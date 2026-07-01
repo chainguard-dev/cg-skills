@@ -205,32 +205,90 @@ def _is_public_action_repo(candidate):
     return meta.get("private") is False and not meta.get("archived", False)
 
 
+_REPO_INDEX = None  # lowercased repo name -> actual repo name (public, non-archived)
+
+
+def _public_repo_index():
+    """
+    Build (once) an index of every PUBLIC, non-archived chainguard-actions repo.
+
+    Returns {lowercased_name: actual_name}, or None if the org listing could not
+    be fetched (callers then fall back to per-candidate lookups). Matching against
+    this index — rather than guessing exact names — is what makes mirror lookup
+    resilient to naming variations (case differences, subpaths) so a public mirror
+    isn't reported as "no equivalent" just because our guess didn't match exactly.
+    """
+    global _REPO_INDEX
+    if _REPO_INDEX is not None:
+        return _REPO_INDEX or None
+    r = _gh("--paginate", "orgs/chainguard-actions/repos?per_page=100",
+            "--jq", ".[] | select(.archived==false and .private==false) | .name",
+            check=False)
+    if r.returncode != 0 or not r.stdout.strip():
+        _REPO_INDEX = {}          # cache the failure; signal "unavailable"
+        return None
+    _REPO_INDEX = {n.strip().lower(): n.strip() for n in r.stdout.splitlines() if n.strip()}
+    return _REPO_INDEX
+
+
+def _fetch_tags(cg_repo):
+    r = _gh(f"repos/{cg_repo}/tags", "--paginate", "--jq", ".[].name", check=False)
+    if r.returncode == 0 and r.stdout.strip():
+        return sorted(
+            [t.strip() for t in r.stdout.splitlines() if t.strip()],
+            key=_tag_sort_key, reverse=True,
+        )
+    return []
+
+
+def _candidate_names(action_name):
+    """Mirror-name candidates for an upstream action, most specific first.
+
+    `owner/repo` -> ["owner-repo", "repo"]; a subpath (`owner/repo/sub`) resolves
+    on the repo, dropping the subpath.
+    """
+    parts = [p for p in action_name.split("/") if p]
+    if len(parts) < 2:
+        return []
+    owner, repo = parts[0], parts[1]
+    return [f"{owner}-{repo}", repo]
+
+
 def get_hardened_tags(action_name):
     """
-    Look up the Chainguard hardened equivalent of action_name via gh API.
+    Look up the Chainguard hardened equivalent of action_name.
 
-    Naming convention: chainguard-actions/{owner}-{repo} (primary),
-    then chainguard-actions/{repo} (fallback).
-
-    Only PUBLIC, non-archived chainguard-actions repos are accepted — private or
-    in-development repos are never recommended (see _is_public_action_repo).
+    Resolves the mirror name (`{owner}-{repo}`, then `{repo}`) against an index of
+    all PUBLIC, non-archived chainguard-actions repos — case-insensitively and with
+    subpath handling — so public mirrors are found even when the exact name differs
+    from a naive guess. Private / in-development repos are never in the index, so
+    they are never recommended. Falls back to a direct per-candidate check if the
+    org index can't be fetched.
 
     FUTURE: replace with chainctl actions catalog list lookup
     (see module docstring piece 1).
     """
     if "/" not in action_name:
         return None, []
-    owner, repo = action_name.split("/", 1)
-    for candidate in [f"chainguard-actions/{owner}-{repo}", f"chainguard-actions/{repo}"]:
-        if not _is_public_action_repo(candidate):
-            continue
-        r = _gh(f"repos/{candidate}/tags", "--paginate", "--jq", ".[].name", check=False)
-        if r.returncode == 0 and r.stdout.strip():
-            tags = sorted(
-                [t.strip() for t in r.stdout.splitlines() if t.strip()],
-                key=_tag_sort_key, reverse=True,
-            )
-            return candidate, tags
+    candidates = _candidate_names(action_name)
+
+    index = _public_repo_index()
+    if index is not None:
+        for cand in candidates:
+            real = index.get(cand.lower())
+            if real:
+                tags = _fetch_tags(f"chainguard-actions/{real}")
+                if tags:
+                    return f"chainguard-actions/{real}", tags
+        return None, []
+
+    # Index unavailable (e.g. org listing failed): fall back to per-candidate checks.
+    for cand in candidates:
+        full = f"chainguard-actions/{cand}"
+        if _is_public_action_repo(full):
+            tags = _fetch_tags(full)
+            if tags:
+                return full, tags
     return None, []
 
 
