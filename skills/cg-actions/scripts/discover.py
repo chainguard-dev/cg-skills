@@ -456,14 +456,18 @@ def _emit_inventory(raw, *, scope, org_label, generated_by, strategy, pin, resol
         else:
             agg_status = "mixed"
             agg_ref = agg_tag = agg_sha = None
-            # One line per distinct version, e.g. "v4 → version-gap; v6 → available".
+            # One line per distinct version, e.g. "v4 → version gap; v6 → available".
+            labels = {True: "available", "version-gap": "version gap",
+                      "already-hardened": "already hardened", False: "no equivalent",
+                      None: "not checked"}
             seen, parts = set(), []
             for o in occ:
                 v = o.get("version") or o.get("ref") or "(unspecified)"
                 if v in seen:
                     continue
                 seen.add(v)
-                parts.append(f"{v} → {o['hardened_available']}")
+                ha = o["hardened_available"]
+                parts.append(f"{v} → {labels.get(ha, ha)}")
             agg_note = "varies by version: " + "; ".join(parts)
 
         actions.append({
