@@ -531,7 +531,7 @@ def render_repo(data):
             wf = occ.get("workflow", "")
             if wf not in wf_map:
                 wf_map[wf] = {}
-            aname = a.get("action", "")
+            aname = a.get("action") or a.get("name", "")
             if aname not in wf_map[wf]:
                 wf_map[wf][aname] = (a, [])
             wf_map[wf][aname][1].append(occ)
@@ -599,7 +599,7 @@ def render_org(data):
             r = occ.get("repo", "")
             if r not in repo_action_map:
                 repo_action_map[r] = {}
-            aname = a.get("action", "")
+            aname = a.get("action") or a.get("name", "")
             repo_action_map[r][aname] = a  # last occurrence wins (same action_obj)
 
     repo_summaries = []
