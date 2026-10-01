@@ -66,10 +66,16 @@ TARGET (defaults to the current directory's repo if omitted):
 OPTIONS:
   --level summary|by-repo|by-workflow   (default: summary)
   --version-strategy same-major|latest  (default: same-major)
+  --pin sha|tag                          Pin swaps to commit SHA (default) or tag
   --export excel                         Also produce an .xlsx report
   --export html                          Also produce an interactive HTML report (auto-opens)
   --include-gaps                         Highlight version gaps prominently
 ```
+
+**Pinning.** By default, hardened swaps are **SHA-pinned** with a version comment
+— `chainguard-actions/actions-checkout@<sha> # v6.0.3` — the GitHub Actions
+hardening best practice (immutable even if the tag moves). Use `--pin tag` for the
+readable-but-mutable tag form (`…@v6.0.3`).
 
 **Examples:**
 ```
@@ -183,6 +189,7 @@ OPTIONS:
   --remove-replaced       Also remove allowlist entries for replaced upstream actions
   --include-gaps          Include version-gap actions in the rewrite
   --version-strategy same-major|latest
+  --pin sha|tag           Pin swaps to commit SHA (default) or tag
   --yes                   Skip confirmation prompts (power-user mode)
 ```
 

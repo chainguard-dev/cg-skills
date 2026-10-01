@@ -168,6 +168,25 @@ button { font-family: inherit; font-size: inherit; cursor: pointer; }
 .table .num   { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 .table .muted { color: var(--text-3); }
 
+/* Expandable action rows */
+.act-row { cursor: pointer; }
+.act-row .caret {
+  display: inline-block; width: 12px; margin-right: 4px; color: var(--text-3);
+  transition: transform 0.12s ease; font-size: 10px;
+}
+.act-row.expanded .caret { transform: rotate(90deg); color: var(--text-1); }
+.detail-row { display: none; }
+.detail-row.open { display: table-row; }
+.detail-row > td { background: var(--bg-2); padding: 4px 16px 14px 34px; border-bottom: 1px solid var(--border-1); }
+.subtable { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.subtable th {
+  text-align: left; color: var(--text-3); font-weight: 500; padding: 6px 10px;
+  border-bottom: 1px solid var(--border-2); text-transform: uppercase;
+  font-size: 10px; letter-spacing: 0.05em;
+}
+.subtable td { padding: 6px 10px; border-bottom: 1px solid var(--border-1); vertical-align: top; }
+.subtable tr:last-child td { border-bottom: none; }
+
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 16px 12px; }
 .chip {
   padding: 5px 10px; border: 1px solid var(--border-2); border-radius: 999px;
@@ -232,12 +251,31 @@ JS = """
 
   // Single-select "click to show": "All" (default) shows everything; clicking a
   // category shows only that one. Clicking the active category again resets to All.
+  function collapseAll() {
+    document.querySelectorAll('.act-row.expanded').forEach(r => r.classList.remove('expanded'));
+    document.querySelectorAll('.detail-row.open').forEach(r => r.classList.remove('open'));
+  }
+
   function select(filter) {
     document.querySelectorAll('.chip[data-filter]').forEach(c =>
       c.classList.toggle('active', c.dataset.filter === filter));
     STATUSES.forEach(s =>
       document.body.setAttribute('data-show-' + s, (filter === 'all' || filter === s) ? '1' : '0'));
+    // Collapse any expanded rows so an open detail row can't outlive its (now
+    // filtered-out) parent.
+    collapseAll();
   }
+
+  // Expand/collapse an action row to reveal its per-version breakdown.
+  document.querySelectorAll('.act-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.copy-btn')) return;   // don't toggle when copying
+      const detail = row.nextElementSibling;
+      if (!detail || !detail.classList.contains('detail-row')) return;
+      const open = detail.classList.toggle('open');
+      row.classList.toggle('expanded', open);
+    });
+  });
 
   document.querySelectorAll('.chip[data-filter]').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -419,6 +457,49 @@ def breakdown_bars(counts, total):
     return "\n".join(rows)
 
 
+def _action_detail(a):
+    """Per-version breakdown table for an action, shown when its row is expanded.
+
+    One row per distinct version in use: the version, its own status/target (so a
+    mixed action's v4-gap and v6-available read individually), and the exact
+    workflow:line locations that pin it.
+    """
+    occ = a.get("occurrences", [])
+    multi_repo = len({o.get("repo", "") for o in occ}) > 1
+    groups = {}
+    for o in occ:
+        v = o.get("version") or o.get("ref") or "(unspecified)"
+        groups.setdefault(v, []).append(o)
+
+    rows = []
+    for v in sorted(groups):
+        olist = groups[v]
+        o0 = olist[0]
+        sk = _status_key(o0.get("hardened_available", a.get("hardened_available")))
+        href = o0.get("hardened_ref") or a.get("hardened_ref") or ""
+        if href and sk in ("available", "version-gap", "already-hardened"):
+            ref_html = (f'<span class="code-inline">{esc(href)}</span>'
+                        f' <button class="copy-btn" data-copy="{esc(href)}">copy</button>')
+        else:
+            ref_html = '<span class="muted">—</span>'
+        locs = []
+        for o in olist:
+            loc = f'{esc(o.get("workflow",""))}:{esc(str(o.get("line","") or ""))}'
+            if multi_repo:
+                loc = f'{esc(o.get("repo",""))} · ' + loc
+            locs.append(loc)
+        rows.append(
+            f'<tr><td class="mono">{esc(v)}</td><td>{pill(sk)}</td>'
+            f'<td>{ref_html}</td><td class="mono muted">{"<br>".join(locs)}</td></tr>'
+        )
+
+    return (
+        '<table class="subtable"><thead><tr>'
+        '<th>Version</th><th>Status</th><th>&#8594; Hardened</th><th>Used in (workflow:line)</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+    )
+
+
 def actions_table(actions, filterable=False):
     rows = []
     for a in actions:
@@ -438,9 +519,10 @@ def actions_table(actions, filterable=False):
 
         note_html = f'<span style="font-size:11px">{esc(hardened_note)}</span>' if hardened_note else ""
 
+        # Clickable action row + a hidden detail row with the per-version breakdown.
         rows.append(f'''
-          <tr data-status="{sk}">
-            <td class="mono">{esc(a.get("action") or a.get("name", ""))}</td>
+          <tr class="act-row" data-status="{sk}">
+            <td class="mono"><span class="caret">&#9656;</span>{esc(a.get("action") or a.get("name", ""))}</td>
             <td class="mono muted">{esc(versions)}</td>
             <td class="num">{len(repos)}</td>
             <td class="num">{len(wfs)}</td>
@@ -448,6 +530,9 @@ def actions_table(actions, filterable=False):
             <td>{pill(sk)}</td>
             <td>{ref_html}</td>
             <td class="muted">{note_html}</td>
+          </tr>
+          <tr class="detail-row" data-status="{sk}">
+            <td colspan="8">{_action_detail(a)}</td>
           </tr>''')
 
     cls = "table filterable" if filterable else "table"
@@ -531,7 +616,7 @@ def render_repo(data):
             wf = occ.get("workflow", "")
             if wf not in wf_map:
                 wf_map[wf] = {}
-            aname = a.get("action", "")
+            aname = a.get("action") or a.get("name", "")
             if aname not in wf_map[wf]:
                 wf_map[wf][aname] = (a, [])
             wf_map[wf][aname][1].append(occ)
@@ -599,7 +684,7 @@ def render_org(data):
             r = occ.get("repo", "")
             if r not in repo_action_map:
                 repo_action_map[r] = {}
-            aname = a.get("action", "")
+            aname = a.get("action") or a.get("name", "")
             repo_action_map[r][aname] = a  # last occurrence wins (same action_obj)
 
     repo_summaries = []
