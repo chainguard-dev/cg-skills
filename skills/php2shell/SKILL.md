@@ -145,8 +145,10 @@ if [ -n "$DB" ]; then
 else
   echo "apk-db: none"
 fi
-# PHP executables on disk, whether or not any package owns them (catches PHP copied in from a build stage)
-tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {print $6}' | grep -E '(^|/)(php|php-fpm|php-cgi|frankenphp)[0-9.]*$' | sed 's/^/executable: /'
+# PHP executables on disk, whether or not any package owns them (catches PHP copied in from a build stage).
+# Take the last field after removing any symlink target: works with GNU tar and bsdtar (macOS), whose
+# `tar -tv` column layouts differ.
+tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {sub(/ -> .*/, ""); print $NF}' | grep -E '(^|/)(php|php-fpm|php-cgi|frankenphp)[0-9.]*$' | sed 's/^/executable: /'
 rm -f "$FS"
 ```
 
