@@ -129,28 +129,40 @@ cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLA
   | sort -u
 ```
 
-**2b. The image's apk database (fallback).** Images you build yourself (derived images, `apk add` builds,
+**2b. The image's filesystem (fallback).** Images you build yourself (derived images, `apk add` builds,
 mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a fails with "found no attestations".
-Read the installed-package database straight from the image's filesystem instead. This doesn't run the image,
-and works on single- and multi-arch references:
+Inspect the image's filesystem instead. This doesn't run the image, and works on single- and multi-arch
+references. It reports three things: whether there's an apk database, any PHP packages it lists, and any PHP
+executables on disk:
 
 ```sh
-for DB in usr/lib/apk/db/installed lib/apk/db/installed; do   # older images use lib/apk/db/installed
-  OUT=$(crane export --platform "$PLAT" "$REF" - | tar -xOf - "$DB" 2>/dev/null \
-        | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^php-8\.[0-9]+(-frankenphp)?$/) print p, $2}')
-  [ -n "$OUT" ] && { echo "$OUT"; break; }
-done
+FS=$(mktemp)    # one export, inspected twice; needs disk space roughly the size of the image
+crane export --platform "$PLAT" "$REF" - > "$FS"
+DB=$(tar -tf "$FS" | grep -m1 -xE '(usr/)?lib/apk/db/installed')
+if [ -n "$DB" ]; then
+  echo "apk-db: $DB"
+  tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^php-8\.[0-9]+(-frankenphp)?$/) print "package:", p, $2}'
+else
+  echo "apk-db: none"
+fi
+# PHP executables on disk, whether or not any package owns them (catches PHP copied in from a build stage)
+tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {print $6}' | grep -E '(^|/)(php|php-fpm|php-cgi|frankenphp)[0-9.]*$' | sed 's/^/executable: /'
+rm -f "$FS"
 ```
 
-`crane export` streams the whole filesystem, so this is slower for large images. Use it only when 2a fails.
+This writes the image's whole filesystem to a temporary file, so it's slower and needs disk space for large images. Use it only when 2a fails.
 
 Interpreting the result:
+- **Packages found:** compare them in step 3.
+- **No PHP package and no PHP executable:** `NOT AFFECTED`.
+- **A PHP executable but no matching package** (with or without an apk database): mark it `UNKNOWN`, never
+  `NOT AFFECTED`. A multi-stage build probably copied PHP in, for example `FROM php-dev AS build` then
+  `FROM glibc-dynamic` + `COPY --from=build /usr/bin/php …`. Distroless Chainguard bases such as
+  `glibc-dynamic` and `static` still have an apk database, so an empty package list alone proves nothing.
+  Find the build stage the binary came from (read the Dockerfile) and check that stage's base image with
+  steps 2–3; tell the user what you found.
 - For mirrored images, read from the mirror. If the mirror has no attestation, 2b on the mirror is the
   authoritative check of what you actually run.
-- If the method that worked found no PHP packages, the image is `NOT AFFECTED`.
-- If neither method can read package data (no attestation and no apk database, such as a distroless
-  runtime stage that copied PHP binaries in), mark the image `UNKNOWN`. Never mark it patched. Ask the
-  user how PHP got into that image.
 
 ## Step 3: Compare versions exactly (read-only)
 
