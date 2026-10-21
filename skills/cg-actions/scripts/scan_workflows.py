@@ -61,7 +61,9 @@ def scan_repo(repo_path):
             print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
                   file=sys.stderr)
             continue
-        if not wf_path.is_relative_to(root):
+        # Compare by identity, not spelling: on a case-insensitive filesystem
+        # repo/x.yml can be inside checkout Repo.
+        if not any(p.samefile(root) for p in wf_path.parents):
             print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
                   file=sys.stderr)
             continue

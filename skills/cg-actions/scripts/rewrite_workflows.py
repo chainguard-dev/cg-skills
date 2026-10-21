@@ -152,7 +152,9 @@ def discover_workflow_files(repo):
                 print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
                       file=sys.stderr)
                 continue
-            if not full.is_relative_to(root):
+            # Compare by identity, not spelling: on a case-insensitive filesystem
+            # repo/x.yml can be inside checkout Repo.
+            if not any(p.samefile(root) for p in full.parents):
                 print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
                       file=sys.stderr)
                 continue
@@ -160,6 +162,16 @@ def discover_workflow_files(repo):
                 # Keep the path under the caller's spelling of repo so relpath against --base-dir holds.
                 found.append(os.path.join(repo, ".github", "workflows", entry.name))
     return found
+
+
+def _resolve_existing(path):
+    """Resolve path's existing prefix strictly, so a symlink loop or dangling link
+    raises; the missing remainder holds no links, so it is appended lexically."""
+    head, rest = Path(path), []
+    while not os.path.lexists(head) and head != head.parent:
+        rest.append(head.name)
+        head = head.parent
+    return Path(os.path.normpath(head.resolve(strict=True).joinpath(*reversed(rest))))
 
 
 def main(argv=None):
@@ -184,8 +196,6 @@ def main(argv=None):
         return 2
 
     base = args.base_dir or args.repo
-    os.makedirs(args.out_dir, exist_ok=True)
-    out_root = Path(args.out_dir).resolve()
 
     summary = {"files": [], "total_replacements": 0,
                "unmatched_actions": {}}  # action name -> count (seen but not in mapping)
@@ -193,17 +203,32 @@ def main(argv=None):
     # Track which mapping keys actually got used.
     used_keys = set()
 
-    # Check every output path before writing any, so a refusal leaves --out-dir untouched.
+    # Check every output path and its .diff before writing any, so a refusal
+    # leaves --out-dir untouched and no output can land outside it or on an input.
     targets = []
-    for path in files:
-        rel = os.path.relpath(path, base) if base else os.path.basename(path)
-        out_path = os.path.join(args.out_dir, rel)
-        if not Path(out_path).resolve().is_relative_to(out_root):
-            print(json.dumps({"error": f"{path} would be written outside --out-dir "
-                                       f"({out_path}); pass a --base-dir that contains it"}),
-                  file=sys.stderr)
-            return 2
-        targets.append((path, rel, out_path))
+    try:
+        out_root = _resolve_existing(args.out_dir)
+        sources = [_resolve_existing(p) for p in files]
+        for path in files:
+            rel = os.path.relpath(path, base) if base else os.path.basename(path)
+            out_path = os.path.join(args.out_dir, rel)
+            for dest in (out_path, out_path + ".diff"):
+                real = _resolve_existing(dest)
+                if not real.is_relative_to(out_root):
+                    print(json.dumps({"error": f"{path} would be written outside --out-dir "
+                                               f"({dest}); pass a --base-dir that contains it"}),
+                          file=sys.stderr)
+                    return 2
+                if real in sources or (real.exists() and any(
+                        src.exists() and real.samefile(src) for src in sources)):
+                    print(json.dumps({"error": f"{dest} is also an input workflow; "
+                                               f"pass an --out-dir that holds no inputs"}),
+                          file=sys.stderr)
+                    return 2
+            targets.append((path, rel, out_path))
+    except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+        print(json.dumps({"error": f"cannot check output paths: {e}"}), file=sys.stderr)
+        return 2
 
     for path, rel, out_path in targets:
         with open(path, "r", encoding="utf-8") as f:

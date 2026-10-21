@@ -106,6 +106,65 @@ else fail "rewrite_workflows: wrote outside --out-dir (rc=$rc)"; fi
 if [ -z "$(find "$tmp/out2" -type f 2>/dev/null)" ]; then
   ok "rewrite_workflows: wrote nothing when any target was out of bounds"
 else fail "rewrite_workflows: wrote $(find "$tmp/out2" -type f | wc -l | tr -d ' ') file(s) before refusing"; fi
+if [ ! -e "$tmp/out2" ]; then ok "rewrite_workflows: did not create --out-dir before refusing"
+else fail "rewrite_workflows: created --out-dir before refusing"; fi
+
+# A .diff output is a destination too: an existing out/ci.yml.diff symlink must
+# not let the diff overwrite a file outside --out-dir.
+mkdir -p "$tmp/out3"
+printf 'keep\n' > "$tmp/outside/victim.txt"
+ln -s "$tmp/outside/victim.txt" "$tmp/out3/ci.yml.diff"
+"$PY" "$SCRIPTS/rewrite_workflows.py" --mapping "$tmp/map.json" --out-dir "$tmp/out3" \
+  --base-dir "$tmp/repo/.github/workflows" "$tmp/repo/.github/workflows/ci.yml" \
+  > /dev/null 2> "$tmp/r3.err"
+rc=$?
+if [ "$rc" -ne 0 ] && [ "$(cat "$tmp/outside/victim.txt")" = keep ] && [ ! -e "$tmp/out3/ci.yml" ]; then
+  ok "rewrite_workflows: refused a .diff symlink outside --out-dir before writing"
+else fail "rewrite_workflows: wrote through a .diff symlink (rc=$rc)"; fi
+
+# With --out-dir inside the checkout, an in-checkout workflow symlink can name
+# its own output path; rewriting it would overwrite the input in place.
+mkdir -p "$tmp/alias/.github/workflows" "$tmp/alias/rewritten/.github/workflows"
+cp "$tmp/repo/.github/workflows/ci.yml" "$tmp/alias/rewritten/.github/workflows/ci.yml"
+ln -s ../../rewritten/.github/workflows/ci.yml "$tmp/alias/.github/workflows/ci.yml"
+"$PY" "$SCRIPTS/rewrite_workflows.py" --mapping "$tmp/map.json" --out-dir "$tmp/alias/rewritten" \
+  --repo "$tmp/alias" > /dev/null 2> "$tmp/r4.err"
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'actions/checkout@v4' "$tmp/alias/rewritten/.github/workflows/ci.yml" \
+    && grep -q 'input' "$tmp/r4.err"; then
+  ok "rewrite_workflows: refused an output that aliases an input"
+else fail "rewrite_workflows: overwrote an input in place (rc=$rc)"; fi
+
+# A symlink loop at a later output path must be refused before the first write,
+# with an error rather than a traceback, on every Python version.
+mkdir -p "$tmp/loopin" "$tmp/out5"
+cp "$tmp/repo/.github/workflows/ci.yml" "$tmp/loopin/a.yml"
+cp "$tmp/repo/.github/workflows/ci.yml" "$tmp/loopin/b.yml"
+ln -s c.yml "$tmp/out5/b.yml"
+ln -s b.yml "$tmp/out5/c.yml"
+"$PY" "$SCRIPTS/rewrite_workflows.py" --mapping "$tmp/map.json" --out-dir "$tmp/out5" \
+  --base-dir "$tmp/loopin" "$tmp/loopin/a.yml" "$tmp/loopin/b.yml" > /dev/null 2> "$tmp/r5.err"
+rc=$?
+if [ "$rc" -eq 2 ] && ! grep -q Traceback "$tmp/r5.err" && grep -q 'b\.yml' "$tmp/r5.err" \
+    && [ ! -e "$tmp/out5/a.yml" ] && [ ! -e "$tmp/out5/a.yml.diff" ]; then
+  ok "rewrite_workflows: refused a later output symlink loop before writing"
+else fail "rewrite_workflows: mishandled a later output symlink loop (rc=$rc)"; fi
+
+# On a case-insensitive filesystem, a symlink to case/shared.yml inside checkout
+# Case names a file in the checkout and must still be scanned.
+mkdir -p "$tmp/Case/.github/workflows"
+if [ -d "$tmp/case" ]; then
+  cp "$tmp/repo/shared/release.yml" "$tmp/Case/shared.yml"
+  ln -s ../../../case/shared.yml "$tmp/Case/.github/workflows/ci.yml"
+  run_readers "$tmp/Case" "-case"
+  for t in d s r; do
+    case $t in d) n=discover ;; s) n=scan_workflows ;; r) n=rewrite_workflows ;; esac
+    if [ "$(cat "$tmp/$t-case.rc")" -eq 0 ] && grep -q 'inside/shared' "$tmp/$t-case.out" \
+        && ! grep -q 'resolves outside' "$tmp/$t-case.err"; then
+      ok "$n: scanned a case-variant symlink inside the checkout"
+    else fail "$n: rejected a case-variant symlink inside the checkout"; fi
+  done
+else echo "skip - case-variant symlink: filesystem is case-sensitive"; fi
 
 echo "$pass passed, $failcount failed"
 [ "$failcount" -eq 0 ]
