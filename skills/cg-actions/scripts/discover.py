@@ -174,7 +174,12 @@ def scan_local_dir(root):
             continue
         # The checkout is untrusted: a symlinked workflow (or workflows dir)
         # could point anywhere on this machine, so read only what stays inside it.
-        full = entry.resolve()
+        try:
+            full = entry.resolve(strict=True)
+        except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+            print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
+                  file=sys.stderr)
+            continue
         if not full.is_relative_to(root):
             print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
                   file=sys.stderr)

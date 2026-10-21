@@ -146,11 +146,17 @@ def discover_workflow_files(repo):
                 continue
             # The repo is untrusted: a symlinked workflow (or workflows dir)
             # could point anywhere on this machine, so read only what stays inside it.
-            if not entry.resolve().is_relative_to(root):
+            try:
+                full = entry.resolve(strict=True)
+            except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+                print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
+                      file=sys.stderr)
+                continue
+            if not full.is_relative_to(root):
                 print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
                       file=sys.stderr)
                 continue
-            if entry.is_file():
+            if full.is_file():
                 # Keep the path under the caller's spelling of repo so relpath against --base-dir holds.
                 found.append(os.path.join(repo, ".github", "workflows", entry.name))
     return found
@@ -187,7 +193,19 @@ def main(argv=None):
     # Track which mapping keys actually got used.
     used_keys = set()
 
+    # Check every output path before writing any, so a refusal leaves --out-dir untouched.
+    targets = []
     for path in files:
+        rel = os.path.relpath(path, base) if base else os.path.basename(path)
+        out_path = os.path.join(args.out_dir, rel)
+        if not Path(out_path).resolve().is_relative_to(out_root):
+            print(json.dumps({"error": f"{path} would be written outside --out-dir "
+                                       f"({out_path}); pass a --base-dir that contains it"}),
+                  file=sys.stderr)
+            return 2
+        targets.append((path, rel, out_path))
+
+    for path, rel, out_path in targets:
         with open(path, "r", encoding="utf-8") as f:
             original = f.read()
         new_text, reps = rewrite_text(original, mapping)
@@ -210,16 +228,6 @@ def main(argv=None):
         for r in reps:
             used_keys.add(r["key"])
 
-        if base:
-            rel = os.path.relpath(path, base)
-        else:
-            rel = os.path.basename(path)
-        out_path = os.path.join(args.out_dir, rel)
-        if not Path(out_path).resolve().is_relative_to(out_root):
-            print(json.dumps({"error": f"{path} would be written outside --out-dir "
-                                       f"({out_path}); pass a --base-dir that contains it"}),
-                  file=sys.stderr)
-            return 2
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(new_text)

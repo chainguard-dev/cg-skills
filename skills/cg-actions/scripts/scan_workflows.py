@@ -55,7 +55,12 @@ def scan_repo(repo_path):
             continue
         # A cloned repo is untrusted: a symlinked workflow (or workflows dir)
         # could point anywhere on this machine, so read only what stays inside it.
-        wf_path = entry.resolve()
+        try:
+            wf_path = entry.resolve(strict=True)
+        except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+            print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
+                  file=sys.stderr)
+            continue
         if not wf_path.is_relative_to(root):
             print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
                   file=sys.stderr)
