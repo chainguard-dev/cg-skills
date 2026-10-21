@@ -50,6 +50,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 USES_RE = re.compile(
     r'^(?P<prefix>\s*(?:-\s*)?uses:\s*)'
@@ -164,16 +165,23 @@ def scan_local_dir(root):
     the output are relative to root so they match what rewrite_workflows.py expects.
     """
     import os
-    wf_dir = os.path.join(root, ".github", "workflows")
-    if not os.path.isdir(wf_dir):
+    root = Path(root).resolve()
+    wf_dir = root / ".github" / "workflows"
+    if not wf_dir.is_dir():
         return
-    for fname in sorted(os.listdir(wf_dir)):
-        if not fname.lower().endswith((".yml", ".yaml")):
+    for entry in sorted(wf_dir.iterdir()):
+        if not entry.name.lower().endswith((".yml", ".yaml")):
             continue
-        full = os.path.join(wf_dir, fname)
-        if not os.path.isfile(full):
+        # The checkout is untrusted: a symlinked workflow (or workflows dir)
+        # could point anywhere on this machine, so read only what stays inside it.
+        full = entry.resolve()
+        if not full.is_relative_to(root):
+            print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
+                  file=sys.stderr)
             continue
-        rel = os.path.join(".github", "workflows", fname)
+        if not full.is_file():
+            continue
+        rel = os.path.join(".github", "workflows", entry.name)
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
         for name, ref, version, i in _extract_uses(lines):

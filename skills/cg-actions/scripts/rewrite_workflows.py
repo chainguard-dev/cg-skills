@@ -45,6 +45,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 # Matches a `uses:` line, capturing:
 #   1 = prefix up to and including `uses:` and following whitespace (incl. optional `- ` list marker)
@@ -136,12 +137,22 @@ def rewrite_text(text, mapping):
 
 
 def discover_workflow_files(repo):
-    wf_dir = os.path.join(repo, ".github", "workflows")
+    root = Path(repo).resolve()
+    wf_dir = root / ".github" / "workflows"
     found = []
-    if os.path.isdir(wf_dir):
-        for entry in sorted(os.listdir(wf_dir)):
-            if entry.endswith((".yml", ".yaml")):
-                found.append(os.path.join(wf_dir, entry))
+    if wf_dir.is_dir():
+        for entry in sorted(wf_dir.iterdir()):
+            if not entry.name.endswith((".yml", ".yaml")):
+                continue
+            # The repo is untrusted: a symlinked workflow (or workflows dir)
+            # could point anywhere on this machine, so read only what stays inside it.
+            if not entry.resolve().is_relative_to(root):
+                print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
+                      file=sys.stderr)
+                continue
+            if entry.is_file():
+                # Keep the path under the caller's spelling of repo so relpath against --base-dir holds.
+                found.append(os.path.join(repo, ".github", "workflows", entry.name))
     return found
 
 
@@ -168,6 +179,7 @@ def main(argv=None):
 
     base = args.base_dir or args.repo
     os.makedirs(args.out_dir, exist_ok=True)
+    out_root = Path(args.out_dir).resolve()
 
     summary = {"files": [], "total_replacements": 0,
                "unmatched_actions": {}}  # action name -> count (seen but not in mapping)
@@ -203,6 +215,11 @@ def main(argv=None):
         else:
             rel = os.path.basename(path)
         out_path = os.path.join(args.out_dir, rel)
+        if not Path(out_path).resolve().is_relative_to(out_root):
+            print(json.dumps({"error": f"{path} would be written outside --out-dir "
+                                       f"({out_path}); pass a --base-dir that contains it"}),
+                  file=sys.stderr)
+            return 2
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(new_text)
