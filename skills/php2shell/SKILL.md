@@ -60,14 +60,17 @@ public_fallback: "cgr.dev/chainguard/php:{8.2,8.3,8.4,8.5}"   # plain php only, 
 scanner_feeds:
   - https://packages.cgr.dev/chainguard/security.json
   - https://packages.wolfi.dev/os/security.json
-signature_verify:
-  # TODO(Chainguard, before publishing): paste the official commands from the signature KB
-  # (KB section 2.3) for public and org registries. The public command below verified successfully on 2026-10-21.
+signature_verify:          # from the KB, section 2.2 ("Verify the signature"); see step 5 for how to run them
   public: >-
-    cosign verify cgr.dev/chainguard/IMAGE@DIGEST
+    cosign verify
     --certificate-oidc-issuer=https://token.actions.githubusercontent.com
     --certificate-identity=https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main
-  org_registry: TODO   # if still TODO: do not guess; ask the user for their verification policy, or stop at step 5
+    cgr.dev/chainguard/IMAGE@DIGEST
+  org_registry: >-
+    cosign verify
+    --certificate-oidc-issuer=https://issuer.enforce.dev
+    --certificate-identity-regexp="https://issuer.enforce.dev/(${IMAGE_SYNCER}|${CUSTOM_IMAGE_BUILDER})"
+    cgr.dev/$ORG/IMAGE@DIGEST
 support: https://support.chainguard.dev
 status_page: https://status.chainguard.dev
 ```
@@ -87,12 +90,18 @@ status_page: https://status.chainguard.dev
 Collect **image references** (`registry/repo:tag` or `@sha256:…`) with the file and line, or workload, where each is used:
 
 ```sh
-# Repos: manifests, Helm values, Compose, Terraform, CI files, Dockerfiles (add mirror prefixes to the pattern)
-grep -rnoE '(cgr\.dev|<mirror-prefix>)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?' <paths> \
-  --include='*.yaml' --include='*.yml' --include='*.json' --include='*.tf' --include='Dockerfile*' --include='*.hcl'
+# Image references (add your mirror prefixes to the pattern)
+IMG_RE='(cgr\.dev|<mirror-prefix>)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?'
+# ...in manifests, Helm values, Compose, Terraform and CI files
+grep -rnoE "$IMG_RE" <paths> --include='*.yaml' --include='*.yml' --include='*.json' --include='*.tf' --include='*.hcl'
+# ...and in Dockerfiles/Containerfiles under any capitalization (grep -i does not affect --include, so use find -iname)
+find <paths> -type f \( -iname 'dockerfile*' -o -iname '*.dockerfile' -o -iname 'containerfile*' \) \
+  -exec grep -noHE "$IMG_RE" {} +
 
-# Dockerfiles that install PHP themselves
-grep -rnE 'apk add.*\bphp-8' <paths> --include='Dockerfile*'
+# Dockerfiles that install PHP themselves. Match the package name alone, because `apk add` is often
+# continued over several lines; read the surrounding lines to see the full command.
+find <paths> -type f \( -iname 'dockerfile*' -o -iname '*.dockerfile' -o -iname 'containerfile*' \) \
+  -exec grep -nHE '\bphp-8\.[0-9]+' {} +
 
 # What's actually running (imageID = the digest the node pulled)
 kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .status.containerStatuses[*]}{.image}{"\t"}{.imageID}{"\n"}{end}{end}'
@@ -101,25 +110,47 @@ kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.m
 Deduplicate by image and digest. Don't filter by image name. Bundling images (e.g. WordPress) are
 affected even though they're not named "php", so check **every** Chainguard image.
 
-## Step 2: Read the PHP version from each image's SBOM (read-only)
+## Step 2: Read the PHP version from each image (read-only)
 
-Resolve tags to digests (`crane digest REF`), then read the SBOM attestation for the digest:
+Resolve tags to digests (`crane digest REF`). Then read the PHP packages using the first method that works.
+
+**2a. SBOM attestation (Chainguard-built images).** Pass `--platform` only when the reference is a
+multi-arch index; cosign rejects it on a single-arch image ("specified reference is not a multiarch image"):
 
 ```sh
-cosign download attestation \
-  --predicate-type=https://spdx.dev/Document \
-  --platform=linux/amd64 \
-  "$REF" \
+PLAT=linux/amd64   # the platform the workload runs on (linux/arm64 too, if used)
+case "$(crane manifest "$REF" | jq -r '.mediaType // empty')" in
+  *image.index*|*manifest.list*) PLAT_FLAG="--platform=$PLAT" ;;
+  *) PLAT_FLAG="" ;;
+esac
+cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLAG "$REF" \
   | jq -r '.payload' | base64 -d \
   | jq -r '.predicate.packages[] | select(.name | test("^php-8\\.[0-9]+(-frankenphp)?$")) | "\(.name) \(.versionInfo)"' \
   | sort -u
 ```
 
-- Use the platform each workload actually runs on (`linux/arm64` too, if used).
-- For mirrored images, read the attestation from the mirror if it was copied with `cosign copy`. Otherwise
-  read it from the matching `cgr.dev` digest.
-- No PHP packages means the image is `NOT AFFECTED`. Attestation unreadable means `UNKNOWN` (step 8).
-- For `-dev` images you may cross-check with: `docker run --rm --entrypoint apk "$REF" info -v | grep -E '^php-8'`.
+**2b. The image's apk database (fallback).** Images you build yourself (derived images, `apk add` builds,
+mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a fails with "found no attestations".
+Read the installed-package database straight from the image's filesystem instead. This doesn't run the image,
+and works on single- and multi-arch references:
+
+```sh
+for DB in usr/lib/apk/db/installed lib/apk/db/installed; do   # older images use lib/apk/db/installed
+  OUT=$(crane export --platform "$PLAT" "$REF" - | tar -xOf - "$DB" 2>/dev/null \
+        | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^php-8\.[0-9]+(-frankenphp)?$/) print p, $2}')
+  [ -n "$OUT" ] && { echo "$OUT"; break; }
+done
+```
+
+`crane export` streams the whole filesystem, so this is slower for large images. Use it only when 2a fails.
+
+Interpreting the result:
+- For mirrored images, read from the mirror. If the mirror has no attestation, 2b on the mirror is the
+  authoritative check of what you actually run.
+- If the method that worked found no PHP packages, the image is `NOT AFFECTED`.
+- If neither method can read package data (no attestation and no apk database, such as a distroless
+  runtime stage that copied PHP binaries in), mark the image `UNKNOWN`. Never mark it patched. Ask the
+  user how PHP got into that image.
 
 ## Step 3: Compare versions exactly (read-only)
 
@@ -152,8 +183,8 @@ and repeat steps 2–3 on it. If it's still vulnerable, go to step 6 for that im
 | By tag (`:8.4`), and the tag now points to a patched digest | Redeploy so nodes pull the new digest (step 7). Rebuild any derived image with `docker build --pull --no-cache`. |
 | By digest (`@sha256:…`) | Replace it with the patched digest you verified in steps 2–3 (and step 5). A pinned digest never picks up a fix on its own. Propose the exact diff. |
 | Via a mirror or cache | Propose `cosign copy cgr.dev/$ORG/IMAGE:TAG <mirror>/IMAGE:TAG` (copies signatures and attestations too), then compare digests on both sides. |
-| Derived image (`FROM cgr.dev/...`) | Rebuild with `--pull --no-cache`, push, then update references to the new image. |
-| Dockerfile with `apk add php-8.x…` | Raise or remove old pins and fail closed with `apk add --no-cache 'php-8.4>=8.4.26-r4'`. Upgrade every installed `php-8.4-*` extension too. Rebuild with `--pull --no-cache`. If a Chainguard Repository **cooldown** blocks the new versions, tell the user that an org Owner can override it in a custom policy; don't change policy yourself. |
+| Derived image (`FROM cgr.dev/...`) | Rebuild with `--pull --no-cache`, push, then update references to the new image. Verify the rebuilt image with steps 2–3: it has no Chainguard attestation, so step 2b applies. |
+| Dockerfile with `apk add php-8.x…` | Raise or remove old pins and fail closed with `apk add --no-cache 'php-8.4>=8.4.26-r4'`. Upgrade every installed `php-8.4-*` extension too. Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If a Chainguard Repository **cooldown** blocks the new versions, tell the user that an org Owner can override it in a custom policy; don't change policy yourself. |
 | Custom Assembly image | These rebuild automatically unless the configuration pins PHP package versions. Ask the user to check (or show you) the configuration in the Chainguard Console; propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
 | `php-8.1` | No fix exists. Propose an upgrade plan to 8.2+ and don't change anything automatically. |
 
@@ -162,9 +193,25 @@ current and target references, and the exact command or diff. Ask for approval p
 
 ## Step 5: Verify signatures before anything new is deployed (read-only)
 
-Verify every target digest with the matching `signature_verify` command from the data block
-(substituting `IMAGE@DIGEST`). If the command for the user's registry is `TODO`, or verification fails,
-**stop**: don't deploy that image; report it and point the user to Support.
+Verify every target digest with the matching `signature_verify` command from the data block,
+substituting `IMAGE@DIGEST`. Use `public` for `cgr.dev/chainguard/...` and `org_registry` for `cgr.dev/$ORG/...`.
+For a mirror, verify the `cgr.dev` digest you copied from, or the mirror copy if it was made with `cosign copy`.
+
+For the org registry, first look up the org's two signing identities:
+
+```sh
+IMAGE_SYNCER=$(chainctl iam account-associations describe "$ORG" -o json | jq -r '.[].chainguard.service_bindings.CATALOG_SYNCER')
+CUSTOM_IMAGE_BUILDER=$(chainctl iam account-associations describe "$ORG" -o json | jq -r '.[].chainguard.service_bindings.APKO_BUILDER')
+```
+
+**Check both values before running cosign.** Each must be a non-empty identity of the form
+`<hex>/<hex>`, not empty and not `null`. cosign matches `--certificate-identity-regexp` anywhere in the
+certificate subject, so an empty alternative in `(${IMAGE_SYNCER}|${CUSTOM_IMAGE_BUILDER})` would accept a
+signature from *any* `issuer.enforce.dev` identity. If one value is missing, drop it from the group (for example
+`(${IMAGE_SYNCER})`). If both are missing, stop: report it, and point the user to Support.
+
+If verification fails for an image, **stop**: don't deploy that image; report it and point the user to Support.
+Never retry with a looser identity or issuer.
 
 ## Step 6: If the fix isn't in the user's registry yet
 
