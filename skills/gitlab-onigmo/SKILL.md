@@ -143,20 +143,34 @@ case "$(crane manifest "$REF" | jq -r '.mediaType // empty')" in
   *image.index*|*manifest.list*) PLAT_FLAG="--platform=$PLAT" ;;
   *) PLAT_FLAG="" ;;
 esac
-cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLAG "$REF" \
-  | jq -r '.payload' | base64 -d \
-  | jq -r '.predicate.packages[]
-      | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|^(commercial-)?gitlab-rails-(ce|ee)(-fips)?-[0-9]+\\.[0-9]+$|^jruby"))
-      | "\(.name) \(.versionInfo)"' \
-  | sort -u
+# cosign exits 0 with no output when an image has no attestation, so check for output explicitly:
+# an empty result is NOT the same as "no Ruby".
+ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLAG "$REF")
+if [ -z "$ATT" ]; then
+  echo "sbom: none"
+else
+  echo "sbom: found"
+  printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d \
+    | jq -r '.predicate.packages[]
+        | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|^(commercial-)?gitlab-rails-(ce|ee)(-fips)?-[0-9]+\\.[0-9]+$|^jruby"))
+        | "\(.name) \(.versionInfo)"' \
+    | sort -u
+fi
 ```
+
+- `sbom: found` plus package lines: compare them in step 3.
+- `sbom: found` and no package lines, on a Chainguard-built image: the SBOM lists no Ruby, so the image is
+  `NOT AFFECTED` by this CVE (still check a GitLab component's version for the release's other CVEs).
+- `sbom: none`: there's no attestation to read. That's normal for images you build yourself. Use 2b.
+- For images you build yourself, use 2b even if they carry an SBOM attestation of their own: it may not
+  list Ruby that was copied in from a build stage.
 
 For GitLab images, the `gitlab-rails` package version is the GitLab version. **Don't trust the image tag
 for it**: while images update, a tag can show the new GitLab version before the Rails package catches up.
 Only images that run Rails have a `gitlab-rails` package; gitaly, workhorse and the other Go components don't.
 
 **2b. The image's filesystem (fallback).** Images you build yourself (derived images, `apk add` builds,
-mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a fails with "found no attestations".
+mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a prints `sbom: none`.
 Inspect the image's filesystem instead. This doesn't run the image, and works on single- and multi-arch
 references. It reports three things: whether there's an apk database, any Ruby packages it lists, and any Ruby
 executables on disk:
