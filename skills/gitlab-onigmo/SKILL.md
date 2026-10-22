@@ -67,12 +67,13 @@ gitlab:
     Older tags (18.x to 19.2) are still pullable but aren't rebuilt and run unpatched Ruby (for example
     19.2 has ruby-3.3 3.3.12-r8 and 18.6 has ruby-3.2). No fix will ship for them; the fix is upgrading.
   version_package:                 # per GitLab component image: the package whose version IS the GitLab version
-    rails_images: "(commercial-)gitlab-rails-(ce|ee)-19.N"   # webservice, sidekiq, toolbox, geo-logcursor
-    workhorse: "gitlab-workhorse-ce-19.N or commercial-gitlab-workhorse-ee-19.N"
-    gitaly: "gitaly-19.N"
-    registry: "gitlab-container-registry-19.N"
-    others: "gitlab-<component>-19.N"   # shell, pages, kas, agent, exporter, runner, runner-helper
+    rails_images: "(commercial-)gitlab-rails-(ce|ee)-X.Y"   # webservice, sidekiq, toolbox, geo-logcursor
+    workhorse: "gitlab-workhorse-ce-X.Y or commercial-gitlab-workhorse-ee-X.Y"
+    gitaly: "gitaly-X.Y"
+    registry: "gitlab-container-registry-X.Y"
+    others: "gitlab-<component>-X.Y"   # shell, pages, kas, agent, exporter, runner, runner-helper
     fips: "-fips variants insert -fips before the stream, e.g. gitaly-fips-19.3"
+  sbom_version_regex: '^(commercial-)?(gitlab|gitaly)(-[a-z]+)*-[0-9]+\.[0-9]+$'   # any stream (18.x, 19.x, 20.x)
   components_with_ruby: [webservice, sidekiq, toolbox, exporter, geo-logcursor, mailroom]   # a hint only; decide from step 2
   components_without_ruby: [gitaly, workhorse, shell, pages, kas, registry, runner]         # a hint only; decide from step 2
 known_affected_images:             # a hint only; always decide from the SBOM
@@ -198,8 +199,8 @@ if [ -z "$PDIG" ]; then
   echo "sbom: error (couldn't resolve the image digest; check access and the reference)"
 else
   ERR=$(mktemp)
-  # cosign versions differ when there's no attestation: some exit 0 with no output, others exit 1 with
-  # "found no attestations". Treat both as none, and anything else non-zero as an error.
+  # cosign versions differ when there's no attestation: v2 exits 0 with no output; v3 exits 1 with "no
+  # attestations with predicate type ... found". Treat both as none, and anything else non-zero as an error.
   ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document "$REPO@$PDIG" 2>"$ERR"); RC=$?
   if [ "$RC" -eq 0 ] && [ -n "$ATT" ]; then
     if SBOM=$(cosign verify-attestation --type spdxjson "${VERIFY_FLAGS[@]}" "$REPO@$PDIG" 2>"$ERR"); then
@@ -207,13 +208,13 @@ else
       printf '%s\n' "$SBOM" | jq -r '.payload' | base64 -d | jq -r '"packages: \(.predicate.packages | length)"'
       printf '%s\n' "$SBOM" | jq -r '.payload' | base64 -d \
         | jq -r '.predicate.packages[]
-            | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|-19\\.[0-9]+$|^jruby-[0-9]+\\.[0-9]+$"))
+            | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|^(commercial-)?(gitlab|gitaly)(-[a-z]+)*-[0-9]+\\.[0-9]+$|^jruby-[0-9]+\\.[0-9]+$"))
             | "\(.name) \(.versionInfo)"' \
         | sort -u
     else
       echo "sbom: found, NOT verified: $(head -c 300 "$ERR")"
     fi
-  elif [ "$RC" -eq 0 ] || grep -q 'found no attestations' "$ERR"; then
+  elif [ "$RC" -eq 0 ] || grep -q 'no attestations' "$ERR"; then
     echo "sbom: none"
   else
     echo "sbom: error (cosign exit $RC): $(head -c 300 "$ERR")"
@@ -236,9 +237,10 @@ fi
   list Ruby that was copied in from a build stage.
 
 For GitLab images, read the GitLab version from the component's own package (`gitlab.version_package`):
-`gitlab-rails-*` for the Rails images, `gitaly-19.N` for gitaly, `gitlab-workhorse-ce-19.N` or
-`commercial-gitlab-workhorse-ee-19.N` for workhorse, and so on. The filter above prints every `-19.N`
-package; pick the component's own one. Helper packages (`-base`, `-logger`, `-scripts`) can be on a different
+`gitlab-rails-*` for the Rails images, `gitaly-X.Y` for gitaly, `gitlab-workhorse-ce-X.Y` or
+`commercial-gitlab-workhorse-ee-X.Y` for workhorse, and so on, where `X.Y` is the stream (for example 19.5 or
+18.11). The filter above prints every GitLab package with a stream suffix (`gitlab.sbom_version_regex`, which
+matches any stream); pick the component's own one. Helper packages (`-base`, `-logger`, `-scripts`) can be on a different
 version, and **the image tag can run ahead of the packages** while images update, so use neither.
 
 **2b. The image's filesystem (fallback).** Images you build yourself (derived images, `apk add` builds,
@@ -256,7 +258,7 @@ else
   DB=$(tar -tf "$FS" 2>/dev/null | grep -m1 -xE '(usr/)?lib/apk/db/installed')
   if [ -n "$DB" ]; then
     echo "apk-db: $DB"
-    tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^ruby-[0-9]+\.[0-9]+$/ || p ~ /-19\.[0-9]+$/ || p ~ /^jruby-[0-9]+\.[0-9]+$/) print "package:", p, $2}'
+    tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^ruby-[0-9]+\.[0-9]+$/ || p ~ /^(commercial-)?(gitlab|gitaly)(-[a-z]+)*-[0-9]+\.[0-9]+$/ || p ~ /^jruby-[0-9]+\.[0-9]+$/) print "package:", p, $2}'
   else
     echo "apk-db: none"
   fi
@@ -329,7 +331,7 @@ Any entry below the fixed version is `VULNERABLE` (note "by lock"). Without a lo
 unpinned package resolves at build time, so check the built image.
 
 **3b. GitLab check** (GitLab component images only). Read the version of the component's own package
-(`gitlab.version_package`); the stream is the `19.N` in its name. Compare the version (without `-rN`) with the
+(`gitlab.version_package`); the stream is the `X.Y` in its name (for example `gitlab-rails-ce-18.11` is stream 18.11). Compare the version (without `-rN`) with the
 same comparator:
 
 | GitLab result | When |
@@ -462,7 +464,7 @@ or "Ruby copied from build stage `build`"), not in the status.
 | GitLab image tag says 19.5.1, but gitlab-rails is older | The tag ran ahead of the Rails package while images updated → pull again later and re-check gitlab-rails |
 | `ruby -v` shows 3.3.12, not a newer Ruby | Expected: the fix is in the `-r10` package, which keeps the 3.3.12 version number |
 | Upstream Ruby 4.0.8 is out; is that the fix? | No: upstream 4.0.8 doesn't include it. Chainguard's ruby-4.0 packages carry the fix, including 4.0.8-r0 |
-| gitaly or workhorse image has no ruby package | Expected: those images don't contain Ruby, so they're not affected by this CVE. Check their own package (`gitaly-19.N`, `gitlab-workhorse-*-19.N`) for the GitLab version (step 3b) |
+| gitaly or workhorse image has no ruby package | Expected: those images don't contain Ruby, so they're not affected by this CVE. Check their own package (`gitaly-X.Y`, `gitlab-workhorse-*-X.Y`) for the GitLab version (step 3b) |
 | Tag still resolves to an old version | Registry not synced (step 6) or mirror not synced (step 4) |
 | Workload still runs the old build | Digest pin, a cached tag (`imagePullPolicy: IfNotPresent`), or pods not restarted (steps 4, 7) |
 | Custom Assembly image still old | A pinned Ruby version in its configuration (step 4) |
