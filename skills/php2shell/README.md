@@ -4,8 +4,8 @@ An agent skill that helps Chainguard customers find, verify and remediate images
 the critical PHP vulnerabilities **CVE-2026-109618** and **CVE-2026-109619** (unauthenticated remote code
 execution, CVSS v4.0 9.2), disclosed by the PHP project on 2026-10-21.
 
-It turns the steps in Chainguard's KB article (*"ACTION REQUIRED: Update Chainguard PHP images for
-CVE-2026-109618 and CVE-2026-109619"*) into instructions an agent can carry out in your environment.
+It turns the steps in Chainguard's KB article (*"ACTION REQUIRED: Update Chainguard images with PHP
+for CVE-2026-109618 and CVE-2026-109619"*) into instructions an agent can carry out in your environment.
 The KB article remains the authority.
 
 ## What it does

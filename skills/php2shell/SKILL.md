@@ -14,7 +14,7 @@ description: >-
 # Remediate CVE-2026-109618 / CVE-2026-109619 in Chainguard PHP images
 
 Published by Chainguard for its customers. This skill implements the steps in Chainguard's KB article
-*"ACTION REQUIRED: Update Chainguard PHP images for CVE-2026-109618 and CVE-2026-109619"* so an agent
+*"ACTION REQUIRED: Update Chainguard images with PHP for CVE-2026-109618 and CVE-2026-109619"* so an agent
 can carry them out in your environment. The human-readable KB remains the authority: if anything here
 disagrees with it, follow the KB and tell the user.
 
@@ -52,11 +52,12 @@ fixed_versions:            # "this version or later"; subpackages (e.g. php-8.4-
 also_fixed_upstream: ["8.2.35", "8.3.36", "8.4.27", "8.5.12"]   # any -rN of these
 end_of_life_no_fix: [php-8.1]
 sbom_package_regex: '^php-8\.[0-9]+(-frankenphp)?$'
-known_affected_images:     # a hint only; always decide from the SBOM
-  php: [php, php-fips, php-fpm, frankenphp]
-  bundling: [wordpress, drupal, laravel, nextcloud-server, adminer, phpmyadmin, phpmyadmin-fips,
-             zabbix, renovate, privatebin-nginx-fpm, privatebin-nginx-fpm-fips, moodle]
-public_fallback: "cgr.dev/chainguard/php:{8.2,8.3,8.4,8.5}"   # plain php only, not -fips/frankenphp/bundling images
+known_affected_images:     # a hint only; always decide from the SBOM. "+fips" = a -fips variant also exists
+  php: [php (+fips), php-fpm (+fips), frankenphp]
+  bundling: [wordpress, drupal, laravel, nextcloud-server (+fips), adminer (+fips), phpmyadmin (+fips),
+             zabbix-web-nginx-pgsql (+fips), renovate (+fips), privatebin-nginx-fpm (+fips), moodle-iamguarded]
+  not_affected_examples: [zabbix-server-pgsql, zabbix-proxy-sqlite3, zabbix-agent2, zabbix-snmptraps,
+                          zabbix-web-service]   # only the Zabbix web frontend contains PHP
 scanner_feeds:
   - https://packages.cgr.dev/chainguard/security.json
   - https://packages.wolfi.dev/os/security.json
@@ -190,7 +191,8 @@ Show the user the inventory table now (see Report format) before proposing any c
 ## Step 4: Plan the fix for each vulnerable reference (propose, then wait for approval)
 
 First check whether a patched build exists **in the user's registry**: resolve the tag's current digest
-and repeat steps 2–3 on it. If it's still vulnerable, go to step 6 for that image.
+and repeat steps 2–3 on it. To see newer builds of a tag, run `chainctl images history IMAGE:TAG --parent $ORG`.
+If no build is patched yet, go to step 6 for that image.
 
 | How it's referenced | Proposed change |
 |---|---|
@@ -198,7 +200,7 @@ and repeat steps 2–3 on it. If it's still vulnerable, go to step 6 for that im
 | By digest (`@sha256:…`) | Replace it with the patched digest you verified in steps 2–3 (and step 5). A pinned digest never picks up a fix on its own. Propose the exact diff. |
 | Via a mirror or cache | Propose `cosign copy cgr.dev/$ORG/IMAGE:TAG <mirror>/IMAGE:TAG` (copies signatures and attestations too), then compare digests on both sides. |
 | Derived image (`FROM cgr.dev/...`) | Rebuild with `--pull --no-cache`, push, then update references to the new image. Verify the rebuilt image with steps 2–3: it has no Chainguard attestation, so step 2b applies. |
-| Dockerfile with `apk add php-8.x…` | Raise or remove old pins and fail closed with `apk add --no-cache 'php-8.4>=8.4.26-r4'`. Upgrade every installed `php-8.4-*` extension too. Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If a Chainguard Repository **cooldown** blocks the new versions, tell the user that an org Owner can override it in a custom policy; don't change policy yourself. |
+| Dockerfile with `apk add php-8.x…` | Raise or remove old pins and fail closed with `apk add --no-cache 'php-8.4>=8.4.26-r4'`. Upgrade every installed `php-8.4-*` extension too. Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If your organization's package **cooldown** policy blocks the fixed versions, tell the user and point them to their Chainguard org admin or Support; don't change policy yourself. |
 | Custom Assembly image | These rebuild automatically unless the configuration pins PHP package versions. Ask the user to check (or show you) the configuration in the Chainguard Console; propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
 | `php-8.1` | No fix exists. Propose an upgrade plan to 8.2+ and don't change anything automatically. |
 
@@ -234,8 +236,6 @@ synced everywhere, but some custom and bundling images may lag.
 
 - Report the image, tag and digest as `WAITING ON CHAINGUARD`, and help the user open a Support request at
   https://support.chainguard.dev, including the image, tag, digest and installed PHP version.
-- For the **plain** `php` image only, offer `public_fallback` as a temporary option (approval required).
-  It doesn't cover php-fips, frankenphp, phpMyAdmin or other bundling images.
 - If they can't update yet, point them to the PHP project's announcement (`disclosure`) for partial
   mitigations. Say clearly that these reduce exposure but are not a fix.
 
