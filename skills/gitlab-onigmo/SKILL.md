@@ -104,6 +104,8 @@ status_page: https://status.chainguard.dev
    - which repositories, directories and clusters (kube contexts) are in scope
    - any **mirror or cache registries** that hold copies of Chainguard images (e.g. `registry.corp/cg/...`)
 3. Confirm auth without touching credentials: `chainctl auth status`, `kubectl config current-context`.
+4. If a mirror or internal registry only serves plain HTTP (anything other than `localhost`), stop and ask the
+   user how they normally reach it. Don't add insecure flags yourself (ground rule 4).
 
 ## Step 1: Inventory every place a Chainguard image or Ruby package is used (read-only)
 
@@ -126,6 +128,9 @@ find <paths> -type f \( -iname 'dockerfile*' -o -iname '*.dockerfile' -o -iname 
 # What's actually running (imageID = the digest the node pulled)
 kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .status.containerStatuses[*]}{.image}{"\t"}{.imageID}{"\n"}{end}{end}'
 ```
+
+Helm values often split an image across `registry`, `repository`, `tag` and `digest` fields. When a match
+has no tag or digest, read the neighbouring lines and join them into the full reference before step 2.
 
 Deduplicate by image and digest. Don't filter by image name. Images that bundle Ruby (fluentd, Renovate,
 GitLab's Rails components) are affected even though they're not named "ruby", so check **every** Chainguard image.
@@ -150,6 +155,7 @@ if [ -z "$ATT" ]; then
   echo "sbom: none"
 else
   echo "sbom: found"
+  printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d | jq -r '"packages: \(.predicate.packages | length)"'
   printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d \
     | jq -r '.predicate.packages[]
         | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|^(commercial-)?gitlab-rails-(ce|ee)(-fips)?-[0-9]+\\.[0-9]+$|^jruby"))
@@ -159,8 +165,9 @@ fi
 ```
 
 - `sbom: found` plus package lines: compare them in step 3.
-- `sbom: found` and no package lines, on a Chainguard-built image: the SBOM lists no Ruby, so the image is
-  `NOT AFFECTED` by this CVE (still check a GitLab component's version for the release's other CVEs).
+- `sbom: found`, `packages: N` with N above 0, and no Ruby lines, on a Chainguard-built image: the SBOM lists
+  no Ruby, so the image is `NOT AFFECTED` by this CVE (still check a GitLab component's version for the
+  release's other CVEs). If `packages:` is 0 or missing, the SBOM wasn't read; use 2b.
 - `sbom: none`: there's no attestation to read. That's normal for images you build yourself. Use 2b.
 - For images you build yourself, use 2b even if they carry an SBOM attestation of their own: it may not
   list Ruby that was copied in from a build stage.
@@ -176,6 +183,7 @@ references. It reports three things: whether there's an apk database, any Ruby p
 executables on disk:
 
 ```sh
+echo "arch: $(crane config --platform "$PLAT" "$REF" | jq -r '.architecture')"   # must match the workload's platform
 FS=$(mktemp)    # one export, inspected twice; needs disk space roughly the size of the image
 crane export --platform "$PLAT" "$REF" - > "$FS"
 DB=$(tar -tf "$FS" | grep -m1 -xE '(usr/)?lib/apk/db/installed')
@@ -192,7 +200,10 @@ tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {sub(/ -> .*/, ""); print $NF}' | grep -E '(^
 rm -f "$FS"
 ```
 
-This writes the image's whole filesystem to a temporary file, so it's slower and needs disk space for large images. Use it only when 2a fails.
+This writes the image's whole filesystem to a temporary file, so it's slower and needs disk space for large
+images. Use it only when 2a prints `sbom: none`. If `arch` isn't the platform the workload runs on, the image
+doesn't have that platform and crane exported a different one: report it and check the reference the
+workload actually pulls.
 
 Interpreting the result:
 - **Ruby packages found:** compare them in step 3.
@@ -202,8 +213,12 @@ Interpreting the result:
   `NOT AFFECTED`. A multi-stage build probably copied Ruby in, for example `FROM ruby-dev AS build` then
   `FROM glibc-dynamic` + `COPY --from=build /usr/bin/ruby …`. Distroless Chainguard bases such as
   `glibc-dynamic` and `static` still have an apk database, so an empty package list alone proves nothing.
-  Find the build stage the binary came from (read the Dockerfile) and check that stage's base image with
-  steps 2–3; tell the user what you found.
+  To resolve it, find the build stage the binary came from (read the Dockerfile) and check that stage's base
+  image **as it was at build time**: if the stage is pinned by digest, check that digest with steps 2–3; with
+  a moving tag, the image's `crane config` history or the build logs may show the digest used. Report
+  `PATCHED (copied from <stage>)` or `VULNERABLE (copied from <stage>)`. If you can't establish the
+  build-time base, keep it `UNKNOWN` and recommend rebuilding with `--pull --no-cache` with the build stage
+  pinned by a verified digest.
 - **Only `jruby` packages:** mark `UNKNOWN` (JRuby uses a different regex engine) and confirm with Support.
 - For mirrored images, read from the mirror. If the mirror has no attestation, 2b on the mirror is the
   authoritative check of what you actually run.
@@ -226,6 +241,10 @@ Classify each Ruby package against `fixed_versions` by matching package name (fo
 
 An image is `VULNERABLE` if **any** Ruby package in it is vulnerable.
 
+**Dockerfiles with no built image to inspect:** rate them from their pins and base images. An `apk add` pin
+below the fixed version is `VULNERABLE (by pin)`. Otherwise check each `FROM` image with steps 2–3, and
+check the image the Dockerfile produces once it's built.
+
 Then, for GitLab images, check the `gitlab-rails` version against `gitlab.fixed_versions` for its stream
 (19.3 needs 19.3.6, and so on), using the same comparator on the version without its `-rN`:
 
@@ -240,9 +259,15 @@ Show the user the inventory table now (see Report format) before proposing any c
 
 ## Step 4: Plan the fix for each vulnerable reference (propose, then wait for approval)
 
-First check whether a patched build exists **in the user's registry**: resolve the tag's current digest
-and repeat steps 2–3 on it. If it's still vulnerable, go to step 6 for that image. To list newer builds
-of a tag: `chainctl images history IMAGE:TAG --parent $ORG`.
+For **images Chainguard builds** (catalog, Custom Assembly and custom images), first check whether a patched
+build exists **in the user's registry**: resolve the tag's current digest and repeat steps 2–3 on it. If it's
+still vulnerable, go to step 6 for that image. To list newer builds of a tag in an org registry:
+`chainctl images history IMAGE:TAG --parent $ORG`. For **images the user builds**, the fix is a rebuild
+(rows below), not Support.
+
+To tell a mirror copy from the user's own build: a mirror copy has the same digest as the image in
+`cgr.dev/$ORG` (compare `crane digest` on both); the user's own build has a different digest, and its
+`crane config` history shows their build steps.
 
 | How it's referenced | Proposed change |
 |---|---|
@@ -262,6 +287,7 @@ current and target references, and the exact command or diff. Ask for approval p
 
 Verify every target digest with the matching `signature_verify` command from the data block,
 substituting `IMAGE@DIGEST`. Use `public` for `cgr.dev/chainguard/...` and `org_registry` for `cgr.dev/$ORG/...`.
+Images the user builds themselves aren't signed by Chainguard; verify them with the user's own signing policy, if any.
 For a mirror, verify the `cgr.dev` digest you copied from, or the mirror copy if it was made with `cosign copy`.
 
 For the org registry, first look up the org's two signing identities:
@@ -316,7 +342,7 @@ Chainguard CVE-2026-110264 (GitLab / Ruby Onigmo) — remediation report (<date,
 | k8s logging/fluentd-x2 | cgr.dev/acme/fluentd:latest | sha256:… | ruby-3.4 3.4.11-r6 | n/a | PATCHED | none |
 | k8s gitlab/gitaly-0 | cgr.dev/acme/gitaly:19.3 | sha256:… | none | n/a | NOT AFFECTED (check GitLab version) | none |
 
-Summary: N references checked · patched · patched, GitLab update needed · vulnerable · end of life · unsupported stream · unknown · waiting on Chainguard
+Summary: N references checked · patched · patched, GitLab update needed · vulnerable · not affected · end of life · unsupported stream · unknown · waiting on Chainguard
 Open items: (each with the next step and owner)
 ```
 
