@@ -63,6 +63,9 @@ sbom_ruby_regex: '^ruby-[0-9]+\.[0-9]+$'
 gitlab:
   fixed_versions: ["19.3.6", "19.4.3", "19.5.1"]   # also fix 11 other CVEs in GitLab's release
   supported_streams: ["19.3", "19.4", "19.5"]      # Chainguard GitLab images are built for these only
+  unsupported_streams_note: >-
+    Older tags (18.x to 19.2) are still pullable but aren't rebuilt and run unpatched Ruby (for example
+    19.2 has ruby-3.3 3.3.12-r8 and 18.6 has ruby-3.2). No fix will ship for them; the fix is upgrading.
   version_package:                 # per GitLab component image: the package whose version IS the GitLab version
     rails_images: "(commercial-)gitlab-rails-(ce|ee)-19.N"   # webservice, sidekiq, toolbox, geo-logcursor
     workhorse: "gitlab-workhorse-ce-19.N or commercial-gitlab-workhorse-ee-19.N"
@@ -86,7 +89,7 @@ scanner_feeds:
 gitlab_detections:                 # GitLab's threat detections for self-managed instances (watch only, not a fix)
   - https://gitlab.com/gitlab-security-oss/tldr/-/blob/main/Detections/platforms/GitLab/Vulnerability%20Detections/onigmo_native_worker_crash.md
   - https://gitlab.com/gitlab-security-oss/tldr/-/blob/main/Detections/platforms/GitLab/Vulnerability%20Detections/org_mode_render_error_burst.md
-signature_verify:                  # from the KB, section 2.2 ("Verify the signature"); see step 5 for how to run them
+signature_verify:                  # KB section 2.2, with the org regexp anchored; also used to verify SBOMs in step 2a
   public: >-
     cosign verify
     --certificate-oidc-issuer=https://token.actions.githubusercontent.com
@@ -95,8 +98,8 @@ signature_verify:                  # from the KB, section 2.2 ("Verify the signa
   org_registry: >-
     cosign verify
     --certificate-oidc-issuer=https://issuer.enforce.dev
-    --certificate-identity-regexp="https://issuer.enforce.dev/(${IMAGE_SYNCER}|${CUSTOM_IMAGE_BUILDER})"
-    cgr.dev/$ORG/IMAGE@DIGEST
+    --certificate-identity-regexp="^https://issuer\.enforce\.dev/(${IMAGE_SYNCER}|${CUSTOM_IMAGE_BUILDER})$"
+    cgr.dev/$ORG/IMAGE@DIGEST       # anchored: cosign otherwise matches the regexp anywhere in the subject
 support: https://support.chainguard.dev
 status_page: https://status.chainguard.dev
 ```
@@ -109,34 +112,64 @@ status_page: https://status.chainguard.dev
    - their Chainguard organization (`ORG`, as in `cgr.dev/$ORG/...`)
    - which repositories, directories and clusters (kube contexts) are in scope
    - any **mirror or cache registries** that hold copies of Chainguard images (e.g. `registry.corp/cg/...`)
-3. Confirm auth without touching credentials: `chainctl auth status`, `kubectl config current-context`.
-4. If a mirror or internal registry only serves plain HTTP (anything other than `localhost`), stop and ask the
+3. Confirm auth without touching credentials. `chainctl auth status -o json | jq -e .valid` must print `true`
+   before step 2: with an expired session, cosign and crane can hang on the credential helper with no error.
+   If it isn't valid, ask the user to log in. Wrap registry calls in `timeout 120` (`gtimeout` on macOS with
+   coreutils) where available. Also check `kubectl config current-context` if Kubernetes is in scope.
+4. For an org registry, look up the org's two signing identities now (steps 2a and 5 use them). Check both
+   as described in step 5 before using them:
+   ```sh
+   IMAGE_SYNCER=$(chainctl iam account-associations describe "$ORG" -o json | jq -r '.[].chainguard.service_bindings.CATALOG_SYNCER')
+   CUSTOM_IMAGE_BUILDER=$(chainctl iam account-associations describe "$ORG" -o json | jq -r '.[].chainguard.service_bindings.APKO_BUILDER')
+   ```
+5. If a mirror or internal registry only serves plain HTTP (anything other than `localhost`), stop and ask the
    user how they normally reach it. Don't add insecure flags yourself (ground rule 4).
 
 ## Step 1: Inventory every place a Chainguard image or Ruby package is used (read-only)
 
-Collect **image references** (`registry/repo:tag` or `@sha256:…`) with the file and line, or workload, where each is used:
+Collect **image references** (`registry/repo:tag` or `@sha256:…`) with the file and line, or workload, where each is used.
+
+**Primary: `chainctl images discover`** (newer chainctl; check with `chainctl images discover --help`). It reads
+Helm values as written, including a split `registry`/`repository`/`tag` and a global image registry, plus
+Compose, Terraform, Kubernetes manifests and Dockerfiles, and reports file and line:
 
 ```sh
-# Image references (add your mirror prefixes to the pattern)
-IMG_RE='(cgr\.dev|<mirror-prefix>)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?'
+chainctl images discover <path> --parent "$ORG" -o json   # --parent is needed if the identity belongs to several orgs
+```
+
+**Fallback, and for anything `discover` doesn't cover:** search the files directly.
+
+```sh
+# Image references (add your mirror prefixes). The boundary before the hostname skips apk repository URLs
+# such as https://apk.cgr.dev/<org>; the match then includes the leading space or quote, which is harmless.
+IMG_RE='(^|[^A-Za-z0-9.-])(cgr\.dev|<mirror-prefix>)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?'
 # ...in manifests, Helm values, Compose, Terraform and CI files
 grep -rnoE "$IMG_RE" <paths> --include='*.yaml' --include='*.yml' --include='*.json' --include='*.tf' --include='*.hcl'
 # ...and in Dockerfiles/Containerfiles under any capitalization (grep -i does not affect --include, so use find -iname)
 find <paths> -type f \( -iname 'dockerfile*' -o -iname '*.dockerfile' -o -iname 'containerfile*' \) \
   -exec grep -noHE "$IMG_RE" {} +
 
-# Dockerfiles that install Ruby themselves. Match the package name alone, because `apk add` is often
-# continued over several lines; read the surrounding lines to see the full command.
+# Builds that install Ruby themselves: Dockerfiles, apko configs (YAML with contents.packages, or inline in
+# .tf for the apko Terraform provider) and apko lockfiles. Match the package name alone, because `apk add`
+# is often continued over several lines; read the surrounding lines to see the full command.
 find <paths> -type f \( -iname 'dockerfile*' -o -iname '*.dockerfile' -o -iname 'containerfile*' \) \
   -exec grep -nHE '\bruby-[0-9]+\.[0-9]+' {} +
+grep -rnE '\bruby-[0-9]+\.[0-9]+' <paths> --include='*.yaml' --include='*.yml' --include='*.lock.json' --include='*.tf'
 
-# What's actually running (imageID = the digest the node pulled)
-kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .status.containerStatuses[*]}{.image}{"\t"}{.imageID}{"\n"}{end}{end}'
+# Running pods, including init and ephemeral containers (imageID = the digest the node pulled)
+kubectl get pods -A -o json | jq -r '.items[] | .metadata as $m
+  | ((.status.initContainerStatuses // []) + (.status.containerStatuses // []) + (.status.ephemeralContainerStatuses // []))[]
+  | [$m.namespace, $m.name, .image, .imageID] | @tsv'
+# Workload specs, which catch Jobs and CronJobs with no live pod (for GitLab: the migrations Job and the
+# backup CronJob, both on the toolbox image, which contains Ruby)
+kubectl get deploy,sts,ds,job,cronjob -A -o json | jq -r '.items[] | .kind as $k | .metadata as $m
+  | (.spec.jobTemplate.spec.template.spec // .spec.template.spec)
+  | ((.initContainers // []) + (.containers // []))[] | [$k, $m.namespace, $m.name, .image] | @tsv'
 ```
 
-Helm values often split an image across `registry`, `repository`, `tag` and `digest` fields. When a match
-has no tag or digest, read the neighbouring lines and join them into the full reference before step 2.
+Helm values often split an image across `registry`, `repository`, `tag` and `digest` fields, sometimes with a
+global registry. When a grep match has no tag or digest, read the neighbouring lines (and any global registry)
+and join them into the full reference before step 2. `chainctl images discover` does this for you.
 
 Deduplicate by image and digest. Don't filter by image name. Images that bundle Ruby (fluentd, Renovate,
 GitLab's Rails components) are affected even though they're not named "ruby", so check **every** Chainguard image.
@@ -145,39 +178,56 @@ GitLab's Rails components) are affected even though they're not named "ruby", so
 
 Resolve tags to digests (`crane digest REF`). Then read the packages using the first method that works.
 
-**2a. SBOM attestation (Chainguard-built images).** Pass `--platform` only when the reference is a
-multi-arch index; cosign rejects it on a single-arch image ("specified reference is not a multiarch image"):
+**2a. Signed SBOM attestation (Chainguard-built images).** Resolve the platform digest the workload runs,
+check whether an SBOM attestation exists, and read it **only through signature verification**:
+`cosign download attestation` doesn't check signatures, and a mirror or registry the user controls could
+serve anything. Set `VERIFY_FLAGS` to the issuer and identity flags from `signature_verify` (`public` for
+`cgr.dev/chainguard/...`; `org_registry`, with the identities from step 0, for `cgr.dev/$ORG/...`):
 
 ```sh
 PLAT=linux/amd64   # the platform the workload runs on (linux/arm64 too, if used)
 case "$(crane manifest "$REF" | jq -r '.mediaType // empty')" in
-  *image.index*|*manifest.list*) PLAT_FLAG="--platform=$PLAT" ;;
-  *) PLAT_FLAG="" ;;
+  *image.index*|*manifest.list*) PDIG=$(crane digest --platform "$PLAT" "$REF") ;;
+  *) PDIG=$(crane digest "$REF") ;;
 esac
-# cosign exits 0 with no output when an image has no attestation, and non-zero on auth or network
-# errors. Check both: an empty result is NOT the same as "no Ruby", and an error is NOT the same as "no SBOM".
-ERR=$(mktemp)
-ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLAG "$REF" 2>"$ERR"); RC=$?
-if [ "$RC" -ne 0 ]; then
-  echo "sbom: error (cosign exit $RC): $(head -c 300 "$ERR")"
-elif [ -z "$ATT" ]; then
-  echo "sbom: none"
+REPO=$(printf '%s' "$REF" | sed -E 's/@sha256:[a-f0-9]{64}$//; s#^(.*/[^/:]+):[^/]+$#\1#')   # REF without tag or digest
+# Example for public images; see the note above for org registries.
+VERIFY_FLAGS=(--certificate-oidc-issuer=https://token.actions.githubusercontent.com
+  --certificate-identity=https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main)
+if [ -z "$PDIG" ]; then
+  echo "sbom: error (couldn't resolve the image digest; check access and the reference)"
 else
-  echo "sbom: found"
-  printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d | jq -r '"packages: \(.predicate.packages | length)"'
-  printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d \
-    | jq -r '.predicate.packages[]
-        | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|-19\\.[0-9]+$|^jruby"))
-        | "\(.name) \(.versionInfo)"' \
-    | sort -u
+  ERR=$(mktemp)
+  # cosign versions differ when there's no attestation: some exit 0 with no output, others exit 1 with
+  # "found no attestations". Treat both as none, and anything else non-zero as an error.
+  ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document "$REPO@$PDIG" 2>"$ERR"); RC=$?
+  if [ "$RC" -eq 0 ] && [ -n "$ATT" ]; then
+    if SBOM=$(cosign verify-attestation --type spdxjson "${VERIFY_FLAGS[@]}" "$REPO@$PDIG" 2>"$ERR"); then
+      echo "sbom: found, verified"
+      printf '%s\n' "$SBOM" | jq -r '.payload' | base64 -d | jq -r '"packages: \(.predicate.packages | length)"'
+      printf '%s\n' "$SBOM" | jq -r '.payload' | base64 -d \
+        | jq -r '.predicate.packages[]
+            | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|-19\\.[0-9]+$|^jruby-[0-9]+\\.[0-9]+$"))
+            | "\(.name) \(.versionInfo)"' \
+        | sort -u
+    else
+      echo "sbom: found, NOT verified: $(head -c 300 "$ERR")"
+    fi
+  elif [ "$RC" -eq 0 ] || grep -q 'found no attestations' "$ERR"; then
+    echo "sbom: none"
+  else
+    echo "sbom: error (cosign exit $RC): $(head -c 300 "$ERR")"
+  fi
+  rm -f "$ERR"
 fi
-rm -f "$ERR"
 ```
 
-- `sbom: found` plus package lines: compare them in step 3.
-- `sbom: found`, `packages: N` with N above 0, and no Ruby lines, on a Chainguard-built image: the SBOM lists
-  no Ruby, so the image is `NOT AFFECTED` by this CVE (still check a GitLab component's version for the
-  release's other CVEs). If `packages:` is 0 or missing, the SBOM wasn't read; use 2b.
+- `sbom: found, verified` plus package lines: compare them in step 3.
+- `sbom: found, verified`, `packages: N` with N above 0, and no Ruby lines, on a Chainguard-built image: the
+  SBOM lists no Ruby, so the image is `NOT AFFECTED` by this CVE (still check a GitLab component's version for
+  the release's other CVEs). If `packages:` is 0 or missing, the SBOM wasn't read; use 2b.
+- `sbom: found, NOT verified`: **stop** for this image (ground rule 8). Don't mark it `UNKNOWN` and continue
+  with 2b; report it and point the user to Support.
 - `sbom: error`: cosign couldn't read the image, usually auth, network or a wrong reference. **Stop** for this
   image: ask the user to check access (for example `chainctl auth configure-docker`) and re-run 2a. Don't
   fall back to 2b, which would hit the same problem.
@@ -195,7 +245,7 @@ version, and **the image tag can run ahead of the packages** while images update
 mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a prints `sbom: none`.
 Inspect the image's filesystem instead. This doesn't run the image, and works on single- and multi-arch
 references. It reports three things: whether there's an apk database, any Ruby packages it lists, and any Ruby
-executables on disk:
+executables or `libruby` files on disk:
 
 ```sh
 echo "arch: $(crane config --platform "$PLAT" "$REF" | jq -r '.architecture')"   # must match the workload's platform
@@ -206,14 +256,15 @@ else
   DB=$(tar -tf "$FS" 2>/dev/null | grep -m1 -xE '(usr/)?lib/apk/db/installed')
   if [ -n "$DB" ]; then
     echo "apk-db: $DB"
-    tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^ruby-[0-9]+\.[0-9]+$/ || p ~ /-19\.[0-9]+$/ || p ~ /^jruby/) print "package:", p, $2}'
+    tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^ruby-[0-9]+\.[0-9]+$/ || p ~ /-19\.[0-9]+$/ || p ~ /^jruby-[0-9]+\.[0-9]+$/) print "package:", p, $2}'
   else
     echo "apk-db: none"
   fi
-  # Ruby executables on disk, whether or not any package owns them (catches Ruby copied in from a build stage).
+  # Ruby executables and libruby on disk, whether or not any package owns them (catches Ruby copied in from a
+  # build stage; Onigmo is compiled into libruby, so an app can embed it without a ruby executable).
   # Take the last field after removing any symlink target: works with GNU tar and bsdtar (macOS), whose
   # `tar -tv` column layouts differ.
-  tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {sub(/ -> .*/, ""); print $NF}' | grep -E '(^|/)ruby[0-9.]*$' | sed 's/^/executable: /'
+  tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {sub(/ -> .*/, ""); print $NF}' | grep -E '(^|/)(ruby[0-9.]*|libruby\.so[0-9.]*)$' | sed 's/^/ruby-file: /'
 fi
 rm -f "$FS"
 ```
@@ -226,9 +277,9 @@ workload actually pulls.
 Interpreting the result:
 - **`export: error`:** stop for this image and check access, as for `sbom: error`.
 - **Ruby packages found:** compare them in step 3.
-- **No Ruby package and no Ruby executable:** `NOT AFFECTED` by this CVE. For a GitLab component without
+- **No Ruby package and no `ruby-file`:** `NOT AFFECTED` by this CVE. For a GitLab component without
   Ruby (gitaly, workhorse, shell and so on), still check its GitLab version for the release's other CVEs (step 3b).
-- **A Ruby executable but no matching package** (with or without an apk database): mark it `UNKNOWN`, never
+- **A `ruby-file` (executable or `libruby`) but no matching package** (with or without an apk database): mark it `UNKNOWN`, never
   `NOT AFFECTED`. A multi-stage build probably copied Ruby in, for example `FROM ruby-dev AS build` then
   `FROM glibc-dynamic` + `COPY --from=build /usr/bin/ruby …`. Distroless Chainguard bases such as
   `glibc-dynamic` and `static` still have an apk database, so an empty package list alone proves nothing.
@@ -259,11 +310,23 @@ docker run --rm cgr.dev/chainguard/wolfi-base apk version -t "<installed>" "<fix
 | `END OF LIFE` | any Ruby package is in `end_of_life_no_fix` (Ruby 3.2 or earlier); no fix exists |
 | `VULNERABLE` | any Ruby package compares `<` its fixed version (including copied-in Ruby traced to a vulnerable build stage) |
 | `PATCHED` | every Ruby package compares `=` or `>` its fixed version (including copied-in Ruby traced to a patched build stage) |
-| `NOT AFFECTED` | no Ruby package and no Ruby executable |
+| `NOT AFFECTED` | no Ruby package and no `ruby-file` |
 
 **Dockerfiles with no built image to inspect:** rate them from their pins and base images. An `apk add` pin
 below the fixed version is `VULNERABLE`. Otherwise check each `FROM` image with steps 2–3, and check the image
 the Dockerfile produces once it's built.
+
+**apko configs and lockfiles:** the lockfile decides the version, but **only if the build passes
+`apko build --lockfile …`**; apko doesn't pick it up on its own, so check the Makefile or CI. Read the locked
+version per architecture:
+
+```sh
+jq -r '.contents.packages[] | select(.name | test("^ruby-[0-9]+\\.[0-9]+$")) | "\(.name) \(.version) \(.architecture)"' apko.lock.json
+```
+
+Any entry below the fixed version is `VULNERABLE` (note "by lock"). Without a lockfile in use, an exact pin
+(`ruby-3.3=3.3.12-r9`) below the fixed version is `VULNERABLE` (note "by pin"); a fuzzy pin (`~`) or an
+unpinned package resolves at build time, so check the built image.
 
 **3b. GitLab check** (GitLab component images only). Read the version of the component's own package
 (`gitlab.version_package`); the stream is the `19.N` in its name. Compare the version (without `-rN`) with the
@@ -281,9 +344,9 @@ same comparator:
 | # | Ruby status | GitLab result | Final status |
 |---|---|---|---|
 | 1 | `UNKNOWN` | any | `UNKNOWN` |
-| 2 | `END OF LIFE` | any | `END OF LIFE` |
-| 3 | `VULNERABLE` | any | `VULNERABLE` |
-| 4 | `PATCHED` or `NOT AFFECTED` | `UNSUPPORTED` | `UNSUPPORTED STREAM`: recommend 19.3.6, 19.4.3 or 19.5.1 or later |
+| 2 | any other | `UNSUPPORTED` | `UNSUPPORTED STREAM`: no fix will ship for it (`gitlab.unsupported_streams_note`); recommend 19.3.6, 19.4.3 or 19.5.1 or later, and note the Ruby status in the Action column |
+| 3 | `END OF LIFE` | any | `END OF LIFE` |
+| 4 | `VULNERABLE` | any | `VULNERABLE` |
 | 5 | `PATCHED` | `UPDATE NEEDED` | `PATCHED, GITLAB UPDATE NEEDED`: safe from CVE-2026-110264, not from the release's other CVEs |
 | 6 | `NOT AFFECTED` | `UPDATE NEEDED` | `NOT AFFECTED, GITLAB UPDATE NEEDED`: for GitLab's other CVEs only |
 | 7 | `PATCHED` | `OK`, `UNKNOWN` or not GitLab | `PATCHED` |
@@ -295,6 +358,9 @@ After step 4, a `VULNERABLE` Chainguard-built image whose fix isn't in the user'
 Show the user the inventory table now (see Report format) before proposing any changes.
 
 ## Step 4: Plan the fix for each vulnerable reference (propose, then wait for approval)
+
+An `UNSUPPORTED STREAM` image goes straight to the upgrade plan (row below). Don't look for a patched build or
+send it to Support: none will come.
 
 For **images Chainguard builds** (catalog, Custom Assembly and custom images), first check whether a patched
 build exists **in the user's registry**: resolve the tag's current digest and repeat steps 2–3 on it. If it's
@@ -308,12 +374,14 @@ To tell a mirror copy from the user's own build: a mirror copy has the same dige
 
 | How it's referenced | Proposed change |
 |---|---|
-| By tag (`:19.5`), and the tag now points to a patched digest | Redeploy so nodes pull the new digest (step 7). Rebuild any derived image with `docker build --pull --no-cache`. |
+| By tag (`:19.5`), and the tag now points to a patched digest | Propose pinning the reference to the digest you verified in steps 2–3 and 5 (`IMAGE:TAG@sha256:…`), then roll out (step 7). A restart alone can reuse a cached image (`imagePullPolicy: IfNotPresent`), and the tag can move after you verified it. |
 | By digest (`@sha256:…`) | Replace it with the patched digest you verified in steps 2–3 (and step 5). A pinned digest never picks up a fix on its own. Propose the exact diff. |
-| Via a mirror or cache | Propose `cosign copy cgr.dev/$ORG/IMAGE:TAG <mirror>/IMAGE:TAG` (copies signatures and attestations too), then compare digests on both sides. |
-| Derived image (`FROM cgr.dev/...`) | Rebuild with `--pull --no-cache`, push, then update references to the new image. Verify the rebuilt image with steps 2–3: it has no Chainguard attestation, so step 2b applies. |
+| Via a mirror | Propose copying the **verified digest**, not the tag (which can move): `cosign copy cgr.dev/$ORG/IMAGE@sha256:<verified> <mirror>/IMAGE:TAG`. This copies signatures and attestations too. Then compare digests on both sides. |
+| Via a pull-through cache (Artifactory remote repo, Harbor proxy cache) | These can't receive a push. Propose refreshing or expiring the cached tag, or referencing the verified digest, which the cache will fetch. |
+| Derived image (`FROM cgr.dev/...`) | If the `FROM` line is pinned by digest, first propose bumping it to a verified, patched digest (show the diff): rebuilding a pinned base rebuilds the same vulnerable image. Then rebuild with `--pull --no-cache`, push, and update references to the new image. Verify the rebuilt image with steps 2–3: it has no Chainguard attestation, so step 2b applies. |
 | Dockerfile with `apk add ruby-3.x…` | Raise or remove old pins and fail closed, for example `apk add --no-cache 'ruby-3.3>=3.3.12-r10'`. Upgrade every installed `ruby-3.3-*` subpackage too. Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If a policy blocks the new versions, tell the user to contact their org admin or Support; don't change policy yourself. |
-| Custom Assembly image | These rebuild automatically unless the configuration pins Ruby package versions. Ask the user to check (or show you) the configuration in the Chainguard Console; propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
+| apko config or lockfile | Raise or remove the YAML pin (or use `ruby-3.3>=3.3.12-r10`), then regenerate the lockfile with `apko lock`. That moves **every** package to its newest version, so show the user the whole lockfile diff for approval, not just the Ruby lines. Rebuild, then verify with steps 2b–3. |
+| Custom Assembly image | These rebuild automatically unless the configuration pins Ruby package versions. If your chainctl has it, read the pins with `chainctl images overlays list --parent "$ORG" -o json` (packages under `.overlays[].config.contents.packages`, repos under `.bindings[]`; check the output's shape before relying on it). Otherwise ask the user to check the configuration in the Chainguard Console. Propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
 | GitLab stream older than 19.3 | Propose an upgrade plan to 19.3.6, 19.4.3 or 19.5.1 or later, following GitLab's upgrade path. Don't change anything automatically. |
 | Ruby 3.2 or earlier | No fix exists. Propose moving to an image or tag that runs Ruby 3.3 or later. Don't change anything automatically. |
 
@@ -327,12 +395,7 @@ substituting `IMAGE@DIGEST`. Use `public` for `cgr.dev/chainguard/...` and `org_
 Images the user builds themselves aren't signed by Chainguard; verify them with the user's own signing policy, if any.
 For a mirror, verify the `cgr.dev` digest you copied from, or the mirror copy if it was made with `cosign copy`.
 
-For the org registry, first look up the org's two signing identities:
-
-```sh
-IMAGE_SYNCER=$(chainctl iam account-associations describe "$ORG" -o json | jq -r '.[].chainguard.service_bindings.CATALOG_SYNCER')
-CUSTOM_IMAGE_BUILDER=$(chainctl iam account-associations describe "$ORG" -o json | jq -r '.[].chainguard.service_bindings.APKO_BUILDER')
-```
+For the org registry, use the org's two signing identities from step 0.
 
 **Check both values before running cosign.** Each must be a non-empty identity of the form
 `<hex>/<hex>`, not empty and not `null`. cosign matches `--certificate-identity-regexp` anywhere in the
@@ -356,8 +419,9 @@ Patched images reach customer registries automatically, usually within an hour o
 ## Step 7: Apply approved changes and roll out
 
 - Make only the approved edits. Commit on a branch and open a PR if the repo uses one.
-- Roll out the way the user normally does (GitOps sync, `helm upgrade`, `kubectl apply`). Use
-  `kubectl rollout restart` only for tag-referenced workloads, and only with approval.
+- Roll out the way the user normally does (GitOps sync, `helm upgrade`, `kubectl apply`), with the references
+  pinned to verified digests. Don't rely on `kubectl rollout restart` for tag references: nodes that cached
+  the tag keep running the old image.
 - Sync mirrors before redeploying anything that pulls from them.
 
 ## Step 8: Re-verify and report
@@ -400,7 +464,7 @@ or "Ruby copied from build stage `build`"), not in the status.
 | Upstream Ruby 4.0.8 is out; is that the fix? | No: upstream 4.0.8 doesn't include it. Chainguard's ruby-4.0 packages carry the fix, including 4.0.8-r0 |
 | gitaly or workhorse image has no ruby package | Expected: those images don't contain Ruby, so they're not affected by this CVE. Check their own package (`gitaly-19.N`, `gitlab-workhorse-*-19.N`) for the GitLab version (step 3b) |
 | Tag still resolves to an old version | Registry not synced (step 6) or mirror not synced (step 4) |
-| Workload still runs the old build | Digest pin, or pods not restarted (steps 4, 7) |
+| Workload still runs the old build | Digest pin, a cached tag (`imagePullPolicy: IfNotPresent`), or pods not restarted (steps 4, 7) |
 | Custom Assembly image still old | A pinned Ruby version in its configuration (step 4) |
 | Own build still installs an old Ruby | Cached layer or an old `apk add` pin → `--pull --no-cache`, raise the pin |
 
