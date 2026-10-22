@@ -63,9 +63,15 @@ sbom_ruby_regex: '^ruby-[0-9]+\.[0-9]+$'
 gitlab:
   fixed_versions: ["19.3.6", "19.4.3", "19.5.1"]   # also fix 11 other CVEs in GitLab's release
   supported_streams: ["19.3", "19.4", "19.5"]      # Chainguard GitLab images are built for these only
-  sbom_rails_regex: '^(commercial-)?gitlab-rails-(ce|ee)(-fips)?-[0-9]+\.[0-9]+$'   # its version is the GitLab version
-  components_with_ruby: [webservice, sidekiq, toolbox, exporter, geo-logcursor, mailroom]
-  components_without_ruby: [gitaly, workhorse, shell, pages, kas, registry, runner]   # not affected by this CVE
+  version_package:                 # per GitLab component image: the package whose version IS the GitLab version
+    rails_images: "(commercial-)gitlab-rails-(ce|ee)-19.N"   # webservice, sidekiq, toolbox, geo-logcursor
+    workhorse: "gitlab-workhorse-ce-19.N or commercial-gitlab-workhorse-ee-19.N"
+    gitaly: "gitaly-19.N"
+    registry: "gitlab-container-registry-19.N"
+    others: "gitlab-<component>-19.N"   # shell, pages, kas, agent, exporter, runner, runner-helper
+    fips: "-fips variants insert -fips before the stream, e.g. gitaly-fips-19.3"
+  components_with_ruby: [webservice, sidekiq, toolbox, exporter, geo-logcursor, mailroom]   # a hint only; decide from step 2
+  components_without_ruby: [gitaly, workhorse, shell, pages, kas, registry, runner]         # a hint only; decide from step 2
 known_affected_images:             # a hint only; always decide from the SBOM
   gitlab: [gitlab-webservice-ce, gitlab-sidekiq-ce, gitlab-toolbox-ce, gitlab-exporter, gitlab-mailroom,
            commercial-gitlab-webservice-ee, commercial-gitlab-sidekiq-ee, commercial-gitlab-toolbox-ee,
@@ -148,33 +154,42 @@ case "$(crane manifest "$REF" | jq -r '.mediaType // empty')" in
   *image.index*|*manifest.list*) PLAT_FLAG="--platform=$PLAT" ;;
   *) PLAT_FLAG="" ;;
 esac
-# cosign exits 0 with no output when an image has no attestation, so check for output explicitly:
-# an empty result is NOT the same as "no Ruby".
-ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLAG "$REF")
-if [ -z "$ATT" ]; then
+# cosign exits 0 with no output when an image has no attestation, and non-zero on auth or network
+# errors. Check both: an empty result is NOT the same as "no Ruby", and an error is NOT the same as "no SBOM".
+ERR=$(mktemp)
+ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document $PLAT_FLAG "$REF" 2>"$ERR"); RC=$?
+if [ "$RC" -ne 0 ]; then
+  echo "sbom: error (cosign exit $RC): $(head -c 300 "$ERR")"
+elif [ -z "$ATT" ]; then
   echo "sbom: none"
 else
   echo "sbom: found"
   printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d | jq -r '"packages: \(.predicate.packages | length)"'
   printf '%s\n' "$ATT" | jq -r '.payload' | base64 -d \
     | jq -r '.predicate.packages[]
-        | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|^(commercial-)?gitlab-rails-(ce|ee)(-fips)?-[0-9]+\\.[0-9]+$|^jruby"))
+        | select(.name | test("^ruby-[0-9]+\\.[0-9]+$|-19\\.[0-9]+$|^jruby"))
         | "\(.name) \(.versionInfo)"' \
     | sort -u
 fi
+rm -f "$ERR"
 ```
 
 - `sbom: found` plus package lines: compare them in step 3.
 - `sbom: found`, `packages: N` with N above 0, and no Ruby lines, on a Chainguard-built image: the SBOM lists
   no Ruby, so the image is `NOT AFFECTED` by this CVE (still check a GitLab component's version for the
   release's other CVEs). If `packages:` is 0 or missing, the SBOM wasn't read; use 2b.
+- `sbom: error`: cosign couldn't read the image, usually auth, network or a wrong reference. **Stop** for this
+  image: ask the user to check access (for example `chainctl auth configure-docker`) and re-run 2a. Don't
+  fall back to 2b, which would hit the same problem.
 - `sbom: none`: there's no attestation to read. That's normal for images you build yourself. Use 2b.
 - For images you build yourself, use 2b even if they carry an SBOM attestation of their own: it may not
   list Ruby that was copied in from a build stage.
 
-For GitLab images, the `gitlab-rails` package version is the GitLab version. **Don't trust the image tag
-for it**: while images update, a tag can show the new GitLab version before the Rails package catches up.
-Only images that run Rails have a `gitlab-rails` package; gitaly, workhorse and the other Go components don't.
+For GitLab images, read the GitLab version from the component's own package (`gitlab.version_package`):
+`gitlab-rails-*` for the Rails images, `gitaly-19.N` for gitaly, `gitlab-workhorse-ce-19.N` or
+`commercial-gitlab-workhorse-ee-19.N` for workhorse, and so on. The filter above prints every `-19.N`
+package; pick the component's own one. Helper packages (`-base`, `-logger`, `-scripts`) can be on a different
+version, and **the image tag can run ahead of the packages** while images update, so use neither.
 
 **2b. The image's filesystem (fallback).** Images you build yourself (derived images, `apk add` builds,
 mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a prints `sbom: none`.
@@ -185,18 +200,21 @@ executables on disk:
 ```sh
 echo "arch: $(crane config --platform "$PLAT" "$REF" | jq -r '.architecture')"   # must match the workload's platform
 FS=$(mktemp)    # one export, inspected twice; needs disk space roughly the size of the image
-crane export --platform "$PLAT" "$REF" - > "$FS"
-DB=$(tar -tf "$FS" | grep -m1 -xE '(usr/)?lib/apk/db/installed')
-if [ -n "$DB" ]; then
-  echo "apk-db: $DB"
-  tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^ruby-[0-9]+\.[0-9]+$/ || p ~ /^(commercial-)?gitlab-rails-(ce|ee)(-fips)?-[0-9]+\.[0-9]+$/ || p ~ /^jruby/) print "package:", p, $2}'
+if ! crane export --platform "$PLAT" "$REF" - > "$FS" || [ ! -s "$FS" ]; then
+  echo "export: error"   # stop for this image: an empty export would look like "no Ruby"
 else
-  echo "apk-db: none"
+  DB=$(tar -tf "$FS" 2>/dev/null | grep -m1 -xE '(usr/)?lib/apk/db/installed')
+  if [ -n "$DB" ]; then
+    echo "apk-db: $DB"
+    tar -xOf "$FS" "$DB" | awk -F: '/^P:/{p=$2} /^V:/{if (p ~ /^ruby-[0-9]+\.[0-9]+$/ || p ~ /-19\.[0-9]+$/ || p ~ /^jruby/) print "package:", p, $2}'
+  else
+    echo "apk-db: none"
+  fi
+  # Ruby executables on disk, whether or not any package owns them (catches Ruby copied in from a build stage).
+  # Take the last field after removing any symlink target: works with GNU tar and bsdtar (macOS), whose
+  # `tar -tv` column layouts differ.
+  tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {sub(/ -> .*/, ""); print $NF}' | grep -E '(^|/)ruby[0-9.]*$' | sed 's/^/executable: /'
 fi
-# Ruby executables on disk, whether or not any package owns them (catches Ruby copied in from a build stage).
-# Take the last field after removing any symlink target: works with GNU tar and bsdtar (macOS), whose
-# `tar -tv` column layouts differ.
-tar -tvf "$FS" | awk '$1 ~ /^[-l]/ {sub(/ -> .*/, ""); print $NF}' | grep -E '(^|/)ruby[0-9.]*$' | sed 's/^/executable: /'
 rm -f "$FS"
 ```
 
@@ -206,17 +224,18 @@ doesn't have that platform and crane exported a different one: report it and che
 workload actually pulls.
 
 Interpreting the result:
+- **`export: error`:** stop for this image and check access, as for `sbom: error`.
 - **Ruby packages found:** compare them in step 3.
 - **No Ruby package and no Ruby executable:** `NOT AFFECTED` by this CVE. For a GitLab component without
-  Ruby (gitaly, workhorse, shell and so on), still check its GitLab version for the release's other CVEs (step 3).
+  Ruby (gitaly, workhorse, shell and so on), still check its GitLab version for the release's other CVEs (step 3b).
 - **A Ruby executable but no matching package** (with or without an apk database): mark it `UNKNOWN`, never
   `NOT AFFECTED`. A multi-stage build probably copied Ruby in, for example `FROM ruby-dev AS build` then
   `FROM glibc-dynamic` + `COPY --from=build /usr/bin/ruby …`. Distroless Chainguard bases such as
   `glibc-dynamic` and `static` still have an apk database, so an empty package list alone proves nothing.
   To resolve it, find the build stage the binary came from (read the Dockerfile) and check that stage's base
   image **as it was at build time**: if the stage is pinned by digest, check that digest with steps 2–3; with
-  a moving tag, the image's `crane config` history or the build logs may show the digest used. Report
-  `PATCHED (copied from <stage>)` or `VULNERABLE (copied from <stage>)`. If you can't establish the
+  a moving tag, the image's `crane config` history or the build logs may show the digest used. Rate it
+  `PATCHED` or `VULNERABLE` from that stage's Ruby, and note "copied from build stage <name>" in the report. If you can't establish the
   build-time base, keep it `UNKNOWN` and recommend rebuilding with `--pull --no-cache` with the build stage
   pinned by a verified digest.
 - **Only `jruby` packages:** mark `UNKNOWN` (JRuby uses a different regex engine) and confirm with Support.
@@ -231,29 +250,47 @@ Interpreting the result:
 docker run --rm cgr.dev/chainguard/wolfi-base apk version -t "<installed>" "<fixed>"   # prints <, = or >
 ```
 
-Classify each Ruby package against `fixed_versions` by matching package name (for `ruby-3.3` use `ruby-3.3`'s row):
+**3a. Ruby status**, one per image. Compare each Ruby package against `fixed_versions` by name (for
+`ruby-3.3` use `ruby-3.3`'s row), then take the first that applies:
 
-| Result | Status |
+| Ruby status | When |
 |---|---|
-| `=` or `>` | `PATCHED` |
-| `<` | `VULNERABLE` |
-| package is in `end_of_life_no_fix` (Ruby 3.2 or earlier) | `END OF LIFE`: no fix exists; recommend moving to an image or tag that runs Ruby 3.3 or later |
-
-An image is `VULNERABLE` if **any** Ruby package in it is vulnerable.
+| `UNKNOWN` | 2a or 2b couldn't be read; a Ruby executable without a package that you couldn't trace to a build stage; or only `jruby` packages |
+| `END OF LIFE` | any Ruby package is in `end_of_life_no_fix` (Ruby 3.2 or earlier); no fix exists |
+| `VULNERABLE` | any Ruby package compares `<` its fixed version (including copied-in Ruby traced to a vulnerable build stage) |
+| `PATCHED` | every Ruby package compares `=` or `>` its fixed version (including copied-in Ruby traced to a patched build stage) |
+| `NOT AFFECTED` | no Ruby package and no Ruby executable |
 
 **Dockerfiles with no built image to inspect:** rate them from their pins and base images. An `apk add` pin
-below the fixed version is `VULNERABLE (by pin)`. Otherwise check each `FROM` image with steps 2–3, and
-check the image the Dockerfile produces once it's built.
+below the fixed version is `VULNERABLE`. Otherwise check each `FROM` image with steps 2–3, and check the image
+the Dockerfile produces once it's built.
 
-Then, for GitLab images, check the `gitlab-rails` version against `gitlab.fixed_versions` for its stream
-(19.3 needs 19.3.6, and so on), using the same comparator on the version without its `-rN`:
+**3b. GitLab check** (GitLab component images only). Read the version of the component's own package
+(`gitlab.version_package`); the stream is the `19.N` in its name. Compare the version (without `-rN`) with the
+same comparator:
 
-| Ruby result | GitLab result | Status |
-|---|---|---|
-| `PATCHED` | at or above the fixed version | `PATCHED` |
-| `PATCHED` | below the fixed version | `PATCHED, GITLAB UPDATE NEEDED`: safe from CVE-2026-110264, but not from the release's other CVEs |
-| `VULNERABLE` | any | `VULNERABLE` |
-| stream older than 19.3 | any | `UNSUPPORTED STREAM`: Chainguard builds 19.3, 19.4 and 19.5 only; recommend 19.3.6, 19.4.3 or 19.5.1 or later |
+| GitLab result | When |
+|---|---|
+| `OK` | the stream is in `gitlab.fixed_versions` and the version is at or above it, or the stream is newer than every listed stream |
+| `UPDATE NEEDED` | the stream is listed and the version is below its fixed version |
+| `UNSUPPORTED` | the stream is older than every listed stream (Chainguard builds 19.3, 19.4 and 19.5 only) |
+| `UNKNOWN` | no version package was found; say so in the report, but it doesn't change the final status |
+
+**3c. Final status: the first row that matches wins.**
+
+| # | Ruby status | GitLab result | Final status |
+|---|---|---|---|
+| 1 | `UNKNOWN` | any | `UNKNOWN` |
+| 2 | `END OF LIFE` | any | `END OF LIFE` |
+| 3 | `VULNERABLE` | any | `VULNERABLE` |
+| 4 | `PATCHED` or `NOT AFFECTED` | `UNSUPPORTED` | `UNSUPPORTED STREAM`: recommend 19.3.6, 19.4.3 or 19.5.1 or later |
+| 5 | `PATCHED` | `UPDATE NEEDED` | `PATCHED, GITLAB UPDATE NEEDED`: safe from CVE-2026-110264, not from the release's other CVEs |
+| 6 | `NOT AFFECTED` | `UPDATE NEEDED` | `NOT AFFECTED, GITLAB UPDATE NEEDED`: for GitLab's other CVEs only |
+| 7 | `PATCHED` | `OK`, `UNKNOWN` or not GitLab | `PATCHED` |
+| 8 | `NOT AFFECTED` | `OK`, `UNKNOWN` or not GitLab | `NOT AFFECTED` |
+
+After step 4, a `VULNERABLE` Chainguard-built image whose fix isn't in the user's registry yet becomes
+`WAITING ON CHAINGUARD`.
 
 Show the user the inventory table now (see Report format) before proposing any changes.
 
@@ -336,18 +373,20 @@ Patched images reach customer registries automatically, usually within an hour o
 ```
 Chainguard CVE-2026-110264 (GitLab / Ruby Onigmo) — remediation report (<date, UTC>)
 
-| Where used (file:line / ns/workload) | Image reference | Digest | Ruby package(s) | gitlab-rails | Status | Action taken / proposed |
+| Where used (file:line / ns/workload) | Image reference | Digest | Ruby package(s) | GitLab version (package) | Status | Action taken / proposed |
 |---|---|---|---|---|---|---|
-| k8s gitlab/webservice-7f9 | cgr.dev/acme/gitlab-webservice-ce:19.5 | sha256:… | ruby-3.3 3.3.12-r9 | 19.5.1-r0 | VULNERABLE → PATCHED | rollout restart (approved 14:02) |
+| k8s gitlab/webservice-7f9 | cgr.dev/acme/gitlab-webservice-ce:19.5 | sha256:… | ruby-3.3 3.3.12-r9 | gitlab-rails-ce-19.5 19.5.1-r0 | VULNERABLE → PATCHED | rollout restart (approved 14:02) |
 | k8s logging/fluentd-x2 | cgr.dev/acme/fluentd:latest | sha256:… | ruby-3.4 3.4.11-r6 | n/a | PATCHED | none |
-| k8s gitlab/gitaly-0 | cgr.dev/acme/gitaly:19.3 | sha256:… | none | n/a | NOT AFFECTED (check GitLab version) | none |
+| k8s gitlab/gitaly-0 | cgr.dev/acme/gitaly:19.3 | sha256:… | none | gitaly-19.3 19.3.5-r2 | NOT AFFECTED, GITLAB UPDATE NEEDED | pull the 19.3.6 build (proposed) |
 
-Summary: N references checked · patched · patched, GitLab update needed · vulnerable · not affected · end of life · unsupported stream · unknown · waiting on Chainguard
+Summary: N references checked · patched · patched, GitLab update needed · not affected · not affected, GitLab update needed · vulnerable · end of life · unsupported stream · unknown · waiting on Chainguard
 Open items: (each with the next step and owner)
 ```
 
-Statuses: `PATCHED`, `PATCHED, GITLAB UPDATE NEEDED`, `VULNERABLE`, `NOT AFFECTED`, `END OF LIFE`,
-`UNSUPPORTED STREAM`, `UNKNOWN`, `WAITING ON CHAINGUARD`.
+Statuses (from step 3c, plus step 4's `WAITING ON CHAINGUARD`): `PATCHED`, `PATCHED, GITLAB UPDATE NEEDED`,
+`NOT AFFECTED`, `NOT AFFECTED, GITLAB UPDATE NEEDED`, `VULNERABLE`, `END OF LIFE`, `UNSUPPORTED STREAM`,
+`UNKNOWN`, `WAITING ON CHAINGUARD`. Put the reason in the Action column (for example "pin in svc/Dockerfile:4"
+or "Ruby copied from build stage `build`"), not in the status.
 
 ## Troubleshooting (map the user's symptom to the cause)
 
@@ -359,7 +398,7 @@ Statuses: `PATCHED`, `PATCHED, GITLAB UPDATE NEEDED`, `VULNERABLE`, `NOT AFFECTE
 | GitLab image tag says 19.5.1, but gitlab-rails is older | The tag ran ahead of the Rails package while images updated → pull again later and re-check gitlab-rails |
 | `ruby -v` shows 3.3.12, not a newer Ruby | Expected: the fix is in the `-r10` package, which keeps the 3.3.12 version number |
 | Upstream Ruby 4.0.8 is out; is that the fix? | No: upstream 4.0.8 doesn't include it. Chainguard's ruby-4.0 packages carry the fix, including 4.0.8-r0 |
-| gitaly or workhorse image has no ruby package | Expected: those images don't contain Ruby and aren't affected by this CVE; still update them for GitLab's other CVEs |
+| gitaly or workhorse image has no ruby package | Expected: those images don't contain Ruby, so they're not affected by this CVE. Check their own package (`gitaly-19.N`, `gitlab-workhorse-*-19.N`) for the GitLab version (step 3b) |
 | Tag still resolves to an old version | Registry not synced (step 6) or mirror not synced (step 4) |
 | Workload still runs the old build | Digest pin, or pods not restarted (steps 4, 7) |
 | Custom Assembly image still old | A pinned Ruby version in its configuration (step 4) |
