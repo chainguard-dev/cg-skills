@@ -61,10 +61,17 @@ TARGET (pick one; defaults to the current directory's repo if omitted):
 OPTIONS:
   --level summary|by-repo|by-workflow   Report detail level (default: summary)
   --version-strategy same-major|latest  How to pick hardened tags (default: same-major)
+  --pin sha|tag                          How to pin the hardened ref (default: sha)
   --export excel                         Also export to Excel (.xlsx)
   --export html                          Also export interactive HTML report (auto-opens in browser)
   --include-gaps                         Highlight version-gap details prominently
 ```
+
+**Pinning (`--pin`, default `sha`):** the recommended, hardened output pins each
+swap to the **commit SHA** with a version comment —
+`chainguard-actions/actions-checkout@<sha> # v6.0.3` — which is the GitHub Actions
+security best practice (immutable even if the tag moves). Use `--pin tag` for the
+more readable but mutable tag form (`…@v6.0.3`).
 
 **Examples:**
 ```
@@ -131,8 +138,12 @@ OPTIONS:
   --remove-replaced              Also remove allowlist entries for replaced upstream actions
   --include-gaps                 Include version-gap actions in the rewrite
   --version-strategy same-major|latest
+  --pin sha|tag                  Pin swaps to commit SHA (default) or tag
   --yes                          Skip interactive confirmation (power-user mode)
 ```
+
+Swaps are **SHA-pinned by default** (`chainguard-actions/...@<sha> # vX.Y.Z`) — the
+hardening best practice. Pass `--pin tag` for the movable tag form.
 
 **Examples:**
 ```
@@ -226,7 +237,13 @@ python3 scripts/discover.py --actions-list - > inventory.json
 
 # Version strategy
 python3 scripts/discover.py owner/repo --version-strategy latest > inventory.json
+
+# Pinning: SHA-pinned by default; use tags instead with --pin tag
+python3 scripts/discover.py owner/repo --pin tag > inventory.json
 ```
+
+The inventory records the chosen `pin`, and each resolved action carries
+`hardened_ref` (the exact replacement), `hardened_tag`, and `hardened_sha`.
 
 Version strategies:
 - **`same-major`** (default): latest hardened tag within the same major version.
@@ -338,6 +355,7 @@ python3 scripts/rewrite_workflows.py --mapping mapping.json --repo ./repo --out-
 
 Present `.diff` files. Always state:
 - Only `uses:` references changed — `with:` inputs, permissions, formatting untouched
+- Swaps are SHA-pinned with a `# vX.Y.Z` comment by default (`--pin tag` for tags)
 - ⚠️ version-gap swaps: major version jump — inputs need human review
 - CI must pass before merge
 - `chainguard-actions/*` must be in the repo's Actions allowlist
