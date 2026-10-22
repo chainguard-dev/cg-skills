@@ -177,13 +177,23 @@ GitLab's Rails components) are affected even though they're not named "ruby", so
 
 ## Step 2: Read the Ruby (and GitLab) versions from each image (read-only)
 
+First decide, for each image, whether **Chainguard built it** or the **user built it**:
+- Chainguard-built: it's in `cgr.dev/chainguard/...` or `cgr.dev/$ORG/...`, or it's a mirror copy whose digest
+  matches the digest at `cgr.dev/$ORG` (compare `crane digest` on both).
+- The user's own build: a different digest (derived images, `apk add` or apko builds, mirrors rebuilt rather
+  than copied). Its `crane config` history shows the user's build steps.
+
+Use **2a for Chainguard-built images** and **2b for the user's own builds**. That way a verification failure in
+2a really does mean something is wrong.
+
 Resolve tags to digests (`crane digest REF`). Then read the packages using the first method that works.
 
 **2a. Signed SBOM attestation (Chainguard-built images).** Resolve the platform digest the workload runs,
 check whether an SBOM attestation exists, and read it **only through signature verification**:
 `cosign download attestation` doesn't check signatures, and a mirror or registry the user controls could
-serve anything. Set `VERIFY_FLAGS` to the issuer and identity flags from `signature_verify` (`public` for
-`cgr.dev/chainguard/...`; `org_registry`, with the identities from step 0, for `cgr.dev/$ORG/...`):
+serve anything. Set the verification flags with `set --` to the issuer and identity flags from
+`signature_verify` (`public` for `cgr.dev/chainguard/...`; `org_registry`, with the identities from step 0, for
+`cgr.dev/$ORG/...`). The block is plain POSIX `sh`:
 
 ```sh
 PLAT=linux/amd64   # the platform the workload runs on (linux/arm64 too, if used)
@@ -192,9 +202,11 @@ case "$(crane manifest "$REF" | jq -r '.mediaType // empty')" in
   *) PDIG=$(crane digest "$REF") ;;
 esac
 REPO=$(printf '%s' "$REF" | sed -E 's/@sha256:[a-f0-9]{64}$//; s#^(.*/[^/:]+):[^/]+$#\1#')   # REF without tag or digest
-# Example for public images; see the note above for org registries.
-VERIFY_FLAGS=(--certificate-oidc-issuer=https://token.actions.githubusercontent.com
-  --certificate-identity=https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main)
+# Verification flags (public images shown). For cgr.dev/$ORG use:
+#   set -- --certificate-oidc-issuer=https://issuer.enforce.dev \
+#     --certificate-identity-regexp="^https://issuer\.enforce\.dev/(${IMAGE_SYNCER}|${CUSTOM_IMAGE_BUILDER})$"
+set -- --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+  --certificate-identity=https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main
 if [ -z "$PDIG" ]; then
   echo "sbom: error (couldn't resolve the image digest; check access and the reference)"
 else
@@ -203,7 +215,7 @@ else
   # attestations with predicate type ... found". Treat both as none, and anything else non-zero as an error.
   ATT=$(cosign download attestation --predicate-type=https://spdx.dev/Document "$REPO@$PDIG" 2>"$ERR"); RC=$?
   if [ "$RC" -eq 0 ] && [ -n "$ATT" ]; then
-    if SBOM=$(cosign verify-attestation --type spdxjson "${VERIFY_FLAGS[@]}" "$REPO@$PDIG" 2>"$ERR"); then
+    if SBOM=$(cosign verify-attestation --type spdxjson "$@" "$REPO@$PDIG" 2>"$ERR"); then
       echo "sbom: found, verified"
       printf '%s\n' "$SBOM" | jq -r '.payload' | base64 -d | jq -r '"packages: \(.predicate.packages | length)"'
       printf '%s\n' "$SBOM" | jq -r '.payload' | base64 -d \
@@ -227,14 +239,14 @@ fi
 - `sbom: found, verified`, `packages: N` with N above 0, and no Ruby lines, on a Chainguard-built image: the
   SBOM lists no Ruby, so the image is `NOT AFFECTED` by this CVE (still check a GitLab component's version for
   the release's other CVEs). If `packages:` is 0 or missing, the SBOM wasn't read; use 2b.
-- `sbom: found, NOT verified`: **stop** for this image (ground rule 8). Don't mark it `UNKNOWN` and continue
-  with 2b; report it and point the user to Support.
+- `sbom: found, NOT verified`: **stop** for this image (ground rule 8). It's a Chainguard-built image whose SBOM
+  doesn't verify against Chainguard's identity. Don't mark it `UNKNOWN` and continue with 2b; report it and
+  point the user to Support.
 - `sbom: error`: cosign couldn't read the image, usually auth, network or a wrong reference. **Stop** for this
   image: ask the user to check access (for example `chainctl auth configure-docker`) and re-run 2a. Don't
   fall back to 2b, which would hit the same problem.
-- `sbom: none`: there's no attestation to read. That's normal for images you build yourself. Use 2b.
-- For images you build yourself, use 2b even if they carry an SBOM attestation of their own: it may not
-  list Ruby that was copied in from a build stage.
+- `sbom: none`: there's no attestation to read. That's unusual for a Chainguard-built image (re-check that it
+  really is one). Use 2b and say so in the report.
 
 For GitLab images, read the GitLab version from the component's own package (`gitlab.version_package`):
 `gitlab-rails-*` for the Rails images, `gitaly-X.Y` for gitaly, `gitlab-workhorse-ce-X.Y` or
@@ -243,9 +255,9 @@ For GitLab images, read the GitLab version from the component's own package (`gi
 matches any stream); pick the component's own one. Helper packages (`-base`, `-logger`, `-scripts`) can be on a different
 version, and **the image tag can run ahead of the packages** while images update, so use neither.
 
-**2b. The image's filesystem (fallback).** Images you build yourself (derived images, `apk add` builds,
-mirrors copied without `cosign copy`) have no Chainguard attestation, so 2a prints `sbom: none`.
-Inspect the image's filesystem instead. This doesn't run the image, and works on single- and multi-arch
+**2b. The image's filesystem (the user's own builds, and the fallback).** Use it for images the user built
+(derived images, `apk add` and apko builds, mirrors rebuilt rather than copied), even if they carry an SBOM of
+their own, which may not list Ruby copied in from a build stage. Also use it when 2a prints `sbom: none`. This doesn't run the image, and works on single- and multi-arch
 references. It reports three things: whether there's an apk database, any Ruby packages it lists, and any Ruby
 executables or `libruby` files on disk:
 
@@ -272,7 +284,7 @@ rm -f "$FS"
 ```
 
 This writes the image's whole filesystem to a temporary file, so it's slower and needs disk space for large
-images. Use it only when 2a prints `sbom: none`. If `arch` isn't the platform the workload runs on, the image
+images. If `arch` isn't the platform the workload runs on, the image
 doesn't have that platform and crane exported a different one: report it and check the reference the
 workload actually pulls.
 
