@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 USES_RE = re.compile(
     r'^(?P<prefix>\s*(?:-\s*)?uses:\s*)'
@@ -47,12 +48,28 @@ def find_repos(root):
 
 def scan_repo(repo_path):
     """Yield (workflow_rel_path, name, ref, line) for each uses: in the repo."""
-    wf_dir = os.path.join(repo_path, ".github", "workflows")
-    for entry in sorted(os.listdir(wf_dir)):
-        if not entry.endswith((".yml", ".yaml")):
+    root = Path(repo_path).resolve()
+    wf_dir = root / ".github" / "workflows"
+    for entry in sorted(wf_dir.iterdir()):
+        if not entry.name.endswith((".yml", ".yaml")):
             continue
-        wf_path = os.path.join(wf_dir, entry)
-        rel = os.path.join(".github", "workflows", entry)
+        # A cloned repo is untrusted: a symlinked workflow (or workflows dir)
+        # could point anywhere on this machine, so read only what stays inside it.
+        try:
+            wf_path = entry.resolve(strict=True)
+        except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+            print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
+                  file=sys.stderr)
+            continue
+        # Compare by identity, not spelling: on a case-insensitive filesystem
+        # repo/x.yml can be inside checkout Repo.
+        if not any(p.samefile(root) for p in wf_path.parents):
+            print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
+                  file=sys.stderr)
+            continue
+        if not wf_path.is_file():
+            continue
+        rel = os.path.join(".github", "workflows", entry.name)
         with open(wf_path, "r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f, start=1):
                 m = USES_RE.match(line.rstrip("\n"))

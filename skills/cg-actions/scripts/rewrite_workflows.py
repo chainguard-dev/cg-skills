@@ -45,6 +45,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 # Matches a `uses:` line, capturing:
 #   1 = prefix up to and including `uses:` and following whitespace (incl. optional `- ` list marker)
@@ -136,13 +137,41 @@ def rewrite_text(text, mapping):
 
 
 def discover_workflow_files(repo):
-    wf_dir = os.path.join(repo, ".github", "workflows")
+    root = Path(repo).resolve()
+    wf_dir = root / ".github" / "workflows"
     found = []
-    if os.path.isdir(wf_dir):
-        for entry in sorted(os.listdir(wf_dir)):
-            if entry.endswith((".yml", ".yaml")):
-                found.append(os.path.join(wf_dir, entry))
+    if wf_dir.is_dir():
+        for entry in sorted(wf_dir.iterdir()):
+            if not entry.name.endswith((".yml", ".yaml")):
+                continue
+            # The repo is untrusted: a symlinked workflow (or workflows dir)
+            # could point anywhere on this machine, so read only what stays inside it.
+            try:
+                full = entry.resolve(strict=True)
+            except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+                print(f"warning: skipping {entry.relative_to(root)}: cannot resolve: {e}",
+                      file=sys.stderr)
+                continue
+            # Compare by identity, not spelling: on a case-insensitive filesystem
+            # repo/x.yml can be inside checkout Repo.
+            if not any(p.samefile(root) for p in full.parents):
+                print(f"warning: skipping {entry.relative_to(root)}: resolves outside {root}",
+                      file=sys.stderr)
+                continue
+            if full.is_file():
+                # Keep the path under the caller's spelling of repo so relpath against --base-dir holds.
+                found.append(os.path.join(repo, ".github", "workflows", entry.name))
     return found
+
+
+def _resolve_existing(path):
+    """Resolve path's existing prefix strictly, so a symlink loop or dangling link
+    raises; the missing remainder holds no links, so it is appended lexically."""
+    head, rest = Path(path), []
+    while not os.path.lexists(head) and head != head.parent:
+        rest.append(head.name)
+        head = head.parent
+    return Path(os.path.normpath(head.resolve(strict=True).joinpath(*reversed(rest))))
 
 
 def main(argv=None):
@@ -167,7 +196,6 @@ def main(argv=None):
         return 2
 
     base = args.base_dir or args.repo
-    os.makedirs(args.out_dir, exist_ok=True)
 
     summary = {"files": [], "total_replacements": 0,
                "unmatched_actions": {}}  # action name -> count (seen but not in mapping)
@@ -175,7 +203,34 @@ def main(argv=None):
     # Track which mapping keys actually got used.
     used_keys = set()
 
-    for path in files:
+    # Check every output path and its .diff before writing any, so a refusal
+    # leaves --out-dir untouched and no output can land outside it or on an input.
+    targets = []
+    try:
+        out_root = _resolve_existing(args.out_dir)
+        sources = [_resolve_existing(p) for p in files]
+        for path in files:
+            rel = os.path.relpath(path, base) if base else os.path.basename(path)
+            out_path = os.path.join(args.out_dir, rel)
+            for dest in (out_path, out_path + ".diff"):
+                real = _resolve_existing(dest)
+                if not real.is_relative_to(out_root):
+                    print(json.dumps({"error": f"{path} would be written outside --out-dir "
+                                               f"({dest}); pass a --base-dir that contains it"}),
+                          file=sys.stderr)
+                    return 2
+                if real in sources or (real.exists() and any(
+                        src.exists() and real.samefile(src) for src in sources)):
+                    print(json.dumps({"error": f"{dest} is also an input workflow; "
+                                               f"pass an --out-dir that holds no inputs"}),
+                          file=sys.stderr)
+                    return 2
+            targets.append((path, rel, out_path))
+    except (OSError, RuntimeError) as e:  # loop or dangling link; 3.9-3.12 raise RuntimeError
+        print(json.dumps({"error": f"cannot check output paths: {e}"}), file=sys.stderr)
+        return 2
+
+    for path, rel, out_path in targets:
         with open(path, "r", encoding="utf-8") as f:
             original = f.read()
         new_text, reps = rewrite_text(original, mapping)
@@ -198,11 +253,6 @@ def main(argv=None):
         for r in reps:
             used_keys.add(r["key"])
 
-        if base:
-            rel = os.path.relpath(path, base)
-        else:
-            rel = os.path.basename(path)
-        out_path = os.path.join(args.out_dir, rel)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(new_text)

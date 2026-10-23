@@ -192,7 +192,7 @@ can't reach GitHub, ignore it silently and proceed.
 
 ```bash
 gh auth status    # must be authenticated
-python3 --version # needed for all report and rewrite steps
+python3 --version # python3 >= 3.9; needed for all report and rewrite steps
 ```
 
 **Resolve the target.** If the user gave no target, default to the current repo:

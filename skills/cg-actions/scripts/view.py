@@ -3,9 +3,10 @@
 
 Reads inventory.json (from discover.py) and writes a single HTML file styled
 in the Guardener dashboard visual language: dark dev tool, status pills, dense
-tables, sparing green accent. The file is self-contained (inline CSS + system
-font fallbacks), opens in the default browser on macOS/Linux, and includes
-client-side filter chips + copy-to-clipboard buttons for swap suggestions.
+tables, sparing green accent. The file needs no external assets (CSS is inline
+and fonts fall back to the OS defaults), opens in the default browser on
+macOS/Linux, and includes client-side filter chips + copy-to-clipboard buttons
+for swap suggestions.
 
 Usage:
     view.py inventory.json
