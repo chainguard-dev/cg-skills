@@ -51,7 +51,17 @@ cves_by_line:                      # OpenJDK risk matrix (disclosure.openjdk); a
          CVE-2026-114944, CVE-2026-114945, CVE-2026-114946, CVE-2026-114947]
   "27": [CVE-2026-114938, CVE-2026-114939, CVE-2026-114940, CVE-2026-114941, CVE-2026-114942, CVE-2026-114943,
          CVE-2026-114944, CVE-2026-114945, CVE-2026-114946, CVE-2026-114947]
-advisories: {}                     # DRAFT: CVE -> CGA ID, from the KB
+advisories:                        # CVE -> CGA ID (Chainguard advisory data)
+  CVE-2026-114938: CGA-w369-wj44-gwh9
+  CVE-2026-114939: CGA-pmqr-2mq3-899g
+  CVE-2026-114940: CGA-jq5f-3v4h-r392
+  CVE-2026-114941: CGA-v6r8-3jwp-r52x
+  CVE-2026-114942: CGA-rm7x-j9xh-jvrc
+  CVE-2026-114943: CGA-9vg9-wvjw-6pp8
+  CVE-2026-114944: CGA-fg3w-9hgm-cj83
+  CVE-2026-114945: CGA-p9f6-pcgq-v2fv
+  CVE-2026-114946: CGA-7mmq-j7f5-j336
+  CVE-2026-114947: CGA-pp25-38j7-97h7
 disclosure:
   oracle: https://www.oracle.com/security-alerts/cspunov2026.html
   openjdk: https://openjdk.org/groups/vulnerability/advisories/2026-11-17
@@ -88,6 +98,12 @@ fixed_versions:                    # apk origin package -> first fixed version (
   adoptium-openjdk-fips-27: 27.0.1.9.1.0.4-r0
   adoptium-openjdk-jipher-fips-25: 25.0.5.8.1.0.2-r0
   adoptium-openjdk-jipher-fips-27: 27.0.1.9.1.0.4-r0
+  liberica-17: 17.0.21.12.1.0.6-r0
+  liberica-21: 21.0.13.12.1.0.6-r0
+  liberica-25: 25.0.5.11.1.0.5-r0
+  liberica-27: 27.0.1.11.1.0.5-r0
+  openjdk-crac-17: 17.0.21.9.1.0.2-r0
+  openjdk-crac-21: 21.0.13.9.1.0.2-r0
   zulu-8-cpu: 8.0.513-r0             # Zulu: Azul binaries, from Azul's November 2026 release notes
   zulu-8-psu: 8.0.514-r0
   zulu-11-cpu: 11.0.32.1.201-r0
@@ -109,10 +125,6 @@ pending:                           # affected, no fixed build yet: the newest bu
   graalvm-25.3: 25.3.4.1-r1
   graalvm-25.4: 25.4.4.1.1-r2
   graalvm-25.5: 25.5.5.0.3-r1
-  liberica-17: 17.0.21.12-r2
-  liberica-21: 21.0.13.12-r0
-  liberica-25: 25.0.5.11-r3
-  liberica-27: 27.0.1.11-r0
   liberica-8: 8.472.11-r3
   mandrel-25.0: 25.0.5.1-r1
   openjdk-11-openj9: 0.61.0-r4
@@ -120,8 +132,6 @@ pending:                           # affected, no fixed build yet: the newest bu
   openjdk-21-openj9: 0.63.0-r0
   openjdk-25-openj9: 0.63.0-r0
   openjdk-8-openj9: 0.61.0-r8
-  openjdk-crac-17: 17.0.21.9-r0
-  openjdk-crac-21: 21.0.13.9-r1
   openjdk-crac-25: 25.0.5.8-r1
 no_fix:                            # no fixed build will ship for these: move to a supported Java line
   discontinued: [openjdk-7, openjdk-9, openjdk-10, openjdk-12, openjdk-13, openjdk-15, openjdk-16, openjdk-18,
@@ -174,10 +184,6 @@ embedded_runtimes:                 # Chainguard packages that carry their own Ja
 not_openjdk:                       # look like a JVM in step 2b but contain no OpenJDK code
   libgcj-6: "GCJ, the GNU Java runtime; its libjvm.so is not OpenJDK"
   starrocks-be: "lib/libjvm.so is a 6 KB stub (libmockjvm); StarRocks runs on the system JDK from JAVA_HOME"
-known_affected_images:             # a hint only; always decide from steps 2-3. "+fips" = a -fips variant also exists
-  jdk: [jdk, jre, adoptium-jdk, adoptium-jre, amazon-corretto-jdk]   # DRAFT: confirm against the KB list
-  bundling: [elasticsearch (+fips), logstash (+fips)]               # DRAFT: confirm against the KB list
-  embedded_runtime: [ontop, ontop-fips, kafka-native]               # DRAFT: confirm against the KB list
 scanner_feeds:
   - https://packages.cgr.dev/chainguard/security.json
   - https://packages.wolfi.dev/os/security.json
@@ -398,7 +404,7 @@ Rate each finding from step 2 with the first rule that applies:
 
 1. **A package line** (from 2a or 2b), or a `runtime` line whose `IMPLEMENTOR_VERSION` has the form `<package>-<version>-r<N>` with a package name matching `sbom_jdk_regex` (split it at the last `-` before the version: `corretto-17-17.0.21.0.11-r1` is `corretto-17` `17.0.21.0.11-r1`). Map the name to its origin as `subpackages` describes, then:
    - origin in `fixed_versions`: `PATCHED` at or above the fixed version, `VULNERABLE` below it.
-   - origin in `pending`: `VULNERABLE` at or below the listed build (no fixed build exists yet; step 4 makes it `WAITING ON CHAINGUARD`). A build **newer** than the listed one is `UNKNOWN`: it may carry the fix, so check the KB for that package.
+   - origin in `pending`: `VULNERABLE` at or below the listed build (no fixed build is published yet; step 4 makes it `WAITING ON CHAINGUARD`). A build **newer** than the listed one is `UNKNOWN`: it may carry the fix, so check the KB for that package.
    - origin in `no_fix`: `END OF LIFE`. No fixed build will ship; step 4 proposes moving to a supported Java line.
    - matches `sbom_jdk_regex` but appears in none of these: `UNKNOWN`, with "not in this skill's data" in the Action column. Check the KB, or ask Support.
 2. **An `embedded_runtimes` package line:** `VULNERABLE` at or below its `vulnerable_through` build; `PATCHED` at or above its `fixed` build; any other build is `UNKNOWN` until the KB lists its fixed version. Report its `java` line and `kind` in the Java column.
@@ -450,7 +456,7 @@ To tell a mirror copy from the user's own build: a mirror copy has the same dige
 | Dockerfile with `apk add` of a JDK package | Raise or remove old pins and fail closed, for example `apk add --no-cache 'openjdk-21-default-jdk>=21.0.13.1-r0'`. Upgrade every JDK subpackage it installs too (`-jre`, `-jmods`, `-default-jvm`). Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If a policy blocks the new versions, tell the user to contact their org admin or Support; don't change policy yourself. |
 | apko config or lockfile | Raise or remove the YAML pin (or use `openjdk-21-default-jdk>=21.0.13.1-r0`), then regenerate the lockfile with `apko lock`. That moves **every** package to its newest version, so show the user the whole lockfile diff for approval, not just the JDK lines. Rebuild, then verify with steps 2b–3. |
 | Custom Assembly image | These rebuild automatically unless the configuration pins JDK package versions. If your chainctl has it, read the pins with `chainctl images overlays list --parent "$ORG" -o json` (packages under `.overlays[].config.contents.packages`, repos under `.bindings[]`; check the output's shape before relying on it). Otherwise ask the user to check the configuration in the Chainguard Console. Propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
-| Vendor or variant JDK still in `pending` (Temurin 8 and 11, Liberica, Dragonwell, OpenJ9, CRaC, GraalVM, Mandrel) | No fixed build exists yet: each waits for its own upstream release. Report `WAITING ON CHAINGUARD` (step 6). Don't propose switching to another vendor's JDK yourself; that's the user's decision. |
+| Vendor or variant JDK still in `pending` (Adoptium OpenJDK 8 and 11, Liberica 8, Dragonwell, OpenJ9, CRaC 25, GraalVM, Mandrel) | No fixed build is published yet. Report `WAITING ON CHAINGUARD` (step 6). Don't propose switching to another vendor's JDK yourself; that's the user's decision. |
 | `END OF LIFE` (a `no_fix` package, or a runtime on a Java line not in `upstream_fixed`) | No fix will ship. Propose moving to a supported line: the nearest LTS (8, 11, 17, 21 or 25) or 27, as the application allows. Don't change anything automatically. |
 
 Group the plan by repository or cluster. For each item, show the file and line or the workload, the current and target references, and the exact command or diff. Ask for approval per item or per group.
