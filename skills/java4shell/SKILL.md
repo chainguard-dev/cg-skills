@@ -90,6 +90,8 @@ fixed_versions:                    # apk origin package -> first fixed version (
   cof-corretto-21: 21.0.13.1.2-r0
   cof-corretto-25: 25.0.5.1.2-r0
   cof-corretto-27: 27.0.1.1.4-r0
+  adoptium-openjdk-8: 8.514.1-r0
+  adoptium-openjdk-11: 11.0.33.5.1.0.1-r0
   adoptium-openjdk-17: 17.0.21.9.1.0.2-r0
   adoptium-openjdk-21: 21.0.13.9.1.0.2-r0
   adoptium-openjdk-25: 25.0.5.8.1.0.2-r0
@@ -104,6 +106,7 @@ fixed_versions:                    # apk origin package -> first fixed version (
   liberica-27: 27.0.1.11.1.0.5-r0
   openjdk-crac-17: 17.0.21.9.1.0.2-r0
   openjdk-crac-21: 21.0.13.9.1.0.2-r0
+  mandrel-25.0: 25.0.5.1-r2
   zulu-8-cpu: 8.0.513-r0             # Zulu: Azul binaries, from Azul's November 2026 release notes
   zulu-8-psu: 8.0.514-r0
   zulu-11-cpu: 11.0.32.1.201-r0
@@ -116,8 +119,6 @@ fixed_versions:                    # apk origin package -> first fixed version (
   zulu-25-psu: 25.0.5.1-r0
   zulu-27-psu: 27.0.1.1-r0
 pending:                           # affected, no fixed build yet: the newest build known to be vulnerable
-  adoptium-openjdk-11: 11.0.33.5-r4
-  adoptium-openjdk-8: 8.512.5-r3
   alibabadragonwell-dragonwell-8: 8.502.30.29-r0
   graalvm-25: 25.0.4.1-r11
   graalvm-25.1: 25.1.3-r9
@@ -126,7 +127,6 @@ pending:                           # affected, no fixed build yet: the newest bu
   graalvm-25.4: 25.4.4.1.1-r2
   graalvm-25.5: 25.5.5.0.3-r1
   liberica-8: 8.472.11-r3
-  mandrel-25.0: 25.0.5.1-r1
   openjdk-11-openj9: 0.61.0-r4
   openjdk-17-openj9: 0.63.0-r0
   openjdk-21-openj9: 0.63.0-r0
@@ -456,7 +456,7 @@ To tell a mirror copy from the user's own build: a mirror copy has the same dige
 | Dockerfile with `apk add` of a JDK package | Raise or remove old pins and fail closed, for example `apk add --no-cache 'openjdk-21-default-jdk>=21.0.13.1-r0'`. Upgrade every JDK subpackage it installs too (`-jre`, `-jmods`, `-default-jvm`). Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If a policy blocks the new versions, tell the user to contact their org admin or Support; don't change policy yourself. |
 | apko config or lockfile | Raise or remove the YAML pin (or use `openjdk-21-default-jdk>=21.0.13.1-r0`), then regenerate the lockfile with `apko lock`. That moves **every** package to its newest version, so show the user the whole lockfile diff for approval, not just the JDK lines. Rebuild, then verify with steps 2b–3. |
 | Custom Assembly image | These rebuild automatically unless the configuration pins JDK package versions. If your chainctl has it, read the pins with `chainctl images overlays list --parent "$ORG" -o json` (packages under `.overlays[].config.contents.packages`, repos under `.bindings[]`; check the output's shape before relying on it). Otherwise ask the user to check the configuration in the Chainguard Console. Propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
-| Vendor or variant JDK still in `pending` (Adoptium OpenJDK 8 and 11, Liberica 8, Dragonwell, OpenJ9, CRaC 25, GraalVM, Mandrel) | No fixed build is published yet. Report `WAITING ON CHAINGUARD` (step 6). Don't propose switching to another vendor's JDK yourself; that's the user's decision. |
+| Vendor or variant JDK still in `pending` (Liberica 8, Dragonwell, OpenJ9, CRaC 25, GraalVM) | No fixed build is published yet. Report `WAITING ON CHAINGUARD` (step 6). Don't propose switching to another vendor's JDK yourself; that's the user's decision. |
 | `END OF LIFE` (a `no_fix` package, or a runtime on a Java line not in `upstream_fixed`) | No fix will ship. Propose moving to a supported line: the nearest LTS (8, 11, 17, 21 or 25) or 27, as the application allows. Don't change anything automatically. |
 
 Group the plan by repository or cluster. For each item, show the file and line or the workload, the current and target references, and the exact command or diff. Ask for approval per item or per group.
