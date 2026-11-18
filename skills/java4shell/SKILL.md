@@ -65,32 +65,44 @@ fixed_versions:                    # apk origin package -> first fixed version (
   openjdk-fips-25: 25.0.5.1-r0
   openjdk-fips-27: 27.0.1.1-r0
   openjdk-jipher-fips-25: 25.0.5.1-r0
+  openjdk-jipher-fips-27: 27.0.1.1-r0
+  corretto-8: 8.514.01.1-r0
+  corretto-11: 11.0.33.1.1-r0
   corretto-17: 17.0.21.1.2-r0
   corretto-21: 21.0.13.1.2-r0
   corretto-25: 25.0.5.1.2-r0
   corretto-27: 27.0.1.1.4-r0
   corretto-fips-25: 25.0.5.1.2-r0
   corretto-fips-27: 27.0.1.1.4-r0
+  corretto-jipher-fips-25: 25.0.5.1.2-r0
+  corretto-jipher-fips-27: 27.0.1.1.4-r0
   cof-corretto-17: 17.0.21.1.2-r0
   cof-corretto-21: 21.0.13.1.2-r0
   cof-corretto-25: 25.0.5.1.2-r0
   cof-corretto-27: 27.0.1.1.4-r0
+  adoptium-openjdk-17: 17.0.21.9.1.0.2-r0
+  adoptium-openjdk-21: 21.0.13.9.1.0.2-r0
+  adoptium-openjdk-25: 25.0.5.8.1.0.2-r0
+  adoptium-openjdk-27: 27.0.1.9.1.0.4-r0
+  adoptium-openjdk-fips-25: 25.0.5.8.1.0.2-r0
+  adoptium-openjdk-fips-27: 27.0.1.9.1.0.4-r0
+  adoptium-openjdk-jipher-fips-25: 25.0.5.8.1.0.2-r0
+  adoptium-openjdk-jipher-fips-27: 27.0.1.9.1.0.4-r0
+  zulu-8-cpu: 8.0.513-r0             # Zulu: Azul binaries, from Azul's November 2026 release notes
+  zulu-8-psu: 8.0.514-r0
+  zulu-11-cpu: 11.0.32.1.201-r0
+  zulu-11-psu: 11.0.33.1-r0
+  zulu-17-cpu: 17.0.20.1.201-r0
+  zulu-17-psu: 17.0.21.1-r0
+  zulu-21-cpu: 21.0.12.1.201-r0
+  zulu-21-psu: 21.0.13.1-r0
+  zulu-25-cpu: 25.0.4.1.201-r0
+  zulu-25-psu: 25.0.5.1-r0
+  zulu-27-psu: 27.0.1.1-r0
 pending:                           # affected, no fixed build yet: the newest build known to be vulnerable
   adoptium-openjdk-11: 11.0.33.5-r4
-  adoptium-openjdk-17: 17.0.21.9-r0
-  adoptium-openjdk-21: 21.0.13.9-r0
-  adoptium-openjdk-25: 25.0.5.8-r2
-  adoptium-openjdk-27: 27.0.1.9-r0
   adoptium-openjdk-8: 8.512.5-r3
-  adoptium-openjdk-fips-25: 25.0.5.8-r4
-  adoptium-openjdk-fips-27: 27.0.1.9-r1
-  adoptium-openjdk-jipher-fips-25: 25.0.5.8-r5
-  adoptium-openjdk-jipher-fips-27: 27.0.1.9-r3
   alibabadragonwell-dragonwell-8: 8.502.30.29-r0
-  corretto-11: 11.0.33.0.10-r2
-  corretto-8: 8.512.09.1-r2
-  corretto-jipher-fips-25: 25.0.5.0.10-r3
-  corretto-jipher-fips-27: 27.0.1.0.11-r3
   graalvm-25: 25.0.4.1-r11
   graalvm-25.1: 25.1.3-r9
   graalvm-25.2: 25.2.4-r7
@@ -111,18 +123,6 @@ pending:                           # affected, no fixed build yet: the newest bu
   openjdk-crac-17: 17.0.21.9-r0
   openjdk-crac-21: 21.0.13.9-r1
   openjdk-crac-25: 25.0.5.8-r1
-  openjdk-jipher-fips-27: 27.0.1.0.3-r3
-  zulu-11-cpu: 11.0.32.1.103-r1
-  zulu-11-psu: 11.0.33-r1
-  zulu-17-cpu: 17.0.20.1.103-r1
-  zulu-17-psu: 17.0.21.0.3-r0
-  zulu-21-cpu: 21.0.12.1.103-r1
-  zulu-21-psu: 21.0.13.0.3-r0
-  zulu-25-cpu: 25.0.4.1.103-r2
-  zulu-25-psu: 25.0.5.0.3-r0
-  zulu-27-psu: 27.0.1.0.3-r1
-  zulu-8-cpu: 8.0.511-r1
-  zulu-8-psu: 8.0.512-r1
 no_fix:                            # no fixed build will ship for these: move to a supported Java line
   discontinued: [openjdk-7, openjdk-9, openjdk-10, openjdk-12, openjdk-13, openjdk-15, openjdk-16, openjdk-18,
                  openjdk-19, openjdk-20, openjdk-22, openjdk-23, openjdk-24, corretto-24, cof-corretto-24,
@@ -146,11 +146,17 @@ upstream_fixed:                    # for a runtime no package records: compare i
   "21": "21.0.13.1"
   "25": "25.0.5.1"
   "27": "27.0.1.1"
+zulu_cpu_fixed:                    # Azul's CPU builds keep the previous update's JAVA_VERSION (step 3)
+  "8": "8.513"                     # JAVA_VERSION="1.8.0_513"
+  "11": "11.0.32.1.201"
+  "17": "17.0.20.1.201"
+  "21": "21.0.12.1.201"
+  "25": "25.0.4.1.201"
 sbom_jdk_regex: '^((openjdk|corretto|cof-corretto|zulu|liberica|adoptium-openjdk|alibabadragonwell-dragonwell)(-(fips|crac|jipher-fips))?-[0-9]+|graalvm-[0-9]+([.][0-9]+)?|mandrel-[0-9]+([.][0-9]+)?)(-[a-z0-9-]+)?$'
 embedded_runtimes:                 # Chainguard packages that carry their own Java; the SBOM lists the package, not a JDK
-  # vulnerable_through: the newest build known to carry a Java older than this update
-  ontop: {java: "11", kind: jlink, path: /opt/java/openjdk, vulnerable_through: 5.5.0-r34}
-  ontop-fips: {java: "11", kind: jlink, path: /opt/java/openjdk, vulnerable_through: 5.5.0-r29}
+  # vulnerable_through: the newest build known to carry a Java older than this update; fixed: the first build carrying this update's Java
+  ontop: {java: "11", kind: jlink, path: /opt/java/openjdk, vulnerable_through: 5.5.0-r34, fixed: 5.5.0-r35}
+  ontop-fips: {java: "11", kind: jlink, path: /opt/java/openjdk, vulnerable_through: 5.5.0-r29, fixed: 5.5.0-r30}
   kafka-native: {java: "25", kind: native, path: /usr/lib/kafka-native/kafka.Kafka, vulnerable_through: 4.4.0-r1}
   kates-native: {java: "25", kind: native, path: /usr/lib/kates-native/kates, vulnerable_through: 1.41.2-r0}
   truffleruby: {java: "25", kind: native library, path: /usr/share/truffleruby/lib/librubyvm.so, vulnerable_through: 34.0.1-r5}
@@ -395,8 +401,8 @@ Rate each finding from step 2 with the first rule that applies:
    - origin in `pending`: `VULNERABLE` at or below the listed build (no fixed build exists yet; step 4 makes it `WAITING ON CHAINGUARD`). A build **newer** than the listed one is `UNKNOWN`: it may carry the fix, so check the KB for that package.
    - origin in `no_fix`: `END OF LIFE`. No fixed build will ship; step 4 proposes moving to a supported Java line.
    - matches `sbom_jdk_regex` but appears in none of these: `UNKNOWN`, with "not in this skill's data" in the Action column. Check the KB, or ask Support.
-2. **An `embedded_runtimes` package line:** `VULNERABLE` at or below its `vulnerable_through` build; a newer build is `UNKNOWN` until the KB lists its fixed version. Report its `java` line and `kind` in the Java column.
-3. **Any other `runtime` line** (jlink output, a runtime copied in or unpacked from a tarball): take the Java line from `JAVA_VERSION` (`1.8.0_512` is line 8, compared as `8.512`; `11.0.33` is line 11) and compare `JAVA_VERSION` with `upstream_fixed` for that line. A line not in `upstream_fixed` is `END OF LIFE`. Note the result as "by runtime version" in the Action column.
+2. **An `embedded_runtimes` package line:** `VULNERABLE` at or below its `vulnerable_through` build; `PATCHED` at or above its `fixed` build; any other build is `UNKNOWN` until the KB lists its fixed version. Report its `java` line and `kind` in the Java column.
+3. **Any other `runtime` line** (jlink output, a runtime copied in or unpacked from a tarball): take the Java line from `JAVA_VERSION` (`1.8.0_512` is line 8, compared as `8.512`; `11.0.33` is line 11) and compare `JAVA_VERSION` with `upstream_fixed` for that line. A line not in `upstream_fixed` is `END OF LIFE`. An Azul CPU build keeps the previous update's version (`17.0.20.1.201`), so when `IMPLEMENTOR_VERSION` starts with `Zulu`, the line has a `zulu_cpu_fixed` entry and `JAVA_VERSION` is on that entry's update (the same first three parts, or for line 8 the same update number), compare with `zulu_cpu_fixed` instead. Note the result as "by runtime version" in the Action column.
 4. **A `native` line** that no embedded-runtime package explains: take the line from `com.oracle.svm.core.VM.Java.Version` and compare with `upstream_fixed`. Below it is `VULNERABLE`; a line not in `upstream_fixed` is `END OF LIFE`. At or above it, the version alone doesn't show which fixes the native build contains: mark it `UNKNOWN` and check the GraalVM vendor's release notes or ask Support.
 
 A runtime that a package installed shows up as both a package line and a `runtime` line: rate the package line and skip the duplicate.
@@ -444,7 +450,7 @@ To tell a mirror copy from the user's own build: a mirror copy has the same dige
 | Dockerfile with `apk add` of a JDK package | Raise or remove old pins and fail closed, for example `apk add --no-cache 'openjdk-21-default-jdk>=21.0.13.1-r0'`. Upgrade every JDK subpackage it installs too (`-jre`, `-jmods`, `-default-jvm`). Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. If a policy blocks the new versions, tell the user to contact their org admin or Support; don't change policy yourself. |
 | apko config or lockfile | Raise or remove the YAML pin (or use `openjdk-21-default-jdk>=21.0.13.1-r0`), then regenerate the lockfile with `apko lock`. That moves **every** package to its newest version, so show the user the whole lockfile diff for approval, not just the JDK lines. Rebuild, then verify with steps 2b–3. |
 | Custom Assembly image | These rebuild automatically unless the configuration pins JDK package versions. If your chainctl has it, read the pins with `chainctl images overlays list --parent "$ORG" -o json` (packages under `.overlays[].config.contents.packages`, repos under `.bindings[]`; check the output's shape before relying on it). Otherwise ask the user to check the configuration in the Chainguard Console. Propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
-| Vendor or variant JDK still in `pending` (Temurin, Zulu, Liberica, Dragonwell, OpenJ9, CRaC, GraalVM, Mandrel, Corretto 8 and 11) | No fixed build exists yet: each waits for its own upstream release. Report `WAITING ON CHAINGUARD` (step 6). Don't propose switching to another vendor's JDK yourself; that's the user's decision. |
+| Vendor or variant JDK still in `pending` (Temurin 8 and 11, Liberica, Dragonwell, OpenJ9, CRaC, GraalVM, Mandrel) | No fixed build exists yet: each waits for its own upstream release. Report `WAITING ON CHAINGUARD` (step 6). Don't propose switching to another vendor's JDK yourself; that's the user's decision. |
 | `END OF LIFE` (a `no_fix` package, or a runtime on a Java line not in `upstream_fixed`) | No fix will ship. Propose moving to a supported line: the nearest LTS (8, 11, 17, 21 or 25) or 27, as the application allows. Don't change anything automatically. |
 
 Group the plan by repository or cluster. For each item, show the file and line or the workload, the current and target references, and the exact command or diff. Ask for approval per item or per group.
@@ -488,7 +494,7 @@ Chainguard Java4Shell (CVE-2026-114938) and the November 2026 Java SE update —
 |---|---|---|---|---|---|
 | k8s prod/api-7f9 | cgr.dev/acme/jre:21 | sha256:… | openjdk-21-jre 21.0.13.0.3-r1 | VULNERABLE → PATCHED | pinned verified digest (approved 14:02) |
 | svc/Dockerfile:12 | registry.corp/app:1.4 | sha256:… | runtime /opt/app/jre JAVA_VERSION="17.0.21.0.3" | VULNERABLE | bump build stage `jdk` to a patched digest (proposed); by runtime version |
-| k8s kg/ontop-0 | cgr.dev/acme/ontop:latest | sha256:… | ontop 5.5.0-r34 (jlink, Java 11) | WAITING ON CHAINGUARD | embedded runtime, fix pending |
+| k8s kg/ontop-0 | cgr.dev/acme/ontop:latest | sha256:… | ontop 5.5.0-r34 (jlink, Java 11) | WAITING ON CHAINGUARD | embedded runtime; fixed build 5.5.0-r35 not in the registry yet |
 
 Summary: N references checked · patched · not affected · vulnerable · end of life · unknown · waiting on Chainguard
 Open items: (each with the next step and owner)
