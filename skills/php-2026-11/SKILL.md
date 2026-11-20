@@ -18,8 +18,6 @@ description: >-
 
 Published by Chainguard for its customers. This skill implements the steps in Chainguard's KB article *"[ACTION REQUIRED] PHP security updates: update Chainguard images with PHP"* so an agent can carry them out in your environment. The human-readable KB remains the authority: if anything here disagrees with it, follow the KB and tell the user.
 
-DRAFT: the KB article is not posted yet (draft of 2026-11-19 20:11 UTC). Its link goes here, and every DRAFT marker below is checked against the posted article before release.
-
 Three facts shape everything below:
 
 - **Check every PHP subpackage, not only the main package.** PHP's extensions and SAPIs ship as separate packages (`php-8.4-soap`, `php-8.4-fpm`, `php-8.4-pdo`), each with the same version as `php-8.4`. An image can carry a fixed `php-8.4` next to an extension from the previous release, and that image is still vulnerable. Step 2 reads them all.
@@ -95,8 +93,8 @@ upstream_fixed:                      # for a PHP binary no package records: comp
   "8.4": "8.4.28"
   "8.5": "8.5.13"
   "8.6": "8.6.0"
-end_of_life:                         # no fixed build will ship: move to a supported line
-  php-8.1: "PHP 8.1 is end of life upstream and gets no fix (at least CVE-2026-129291 and CVE-2026-127960 reach 8.1); upgrade to 8.2 or later"
+end_of_life:                         # not part of this update: move to a supported line
+  php-8.1: "This release has no fixed php-8.1 build; PHP 8.1 is end of life upstream (since 2025-12-31). At least CVE-2026-129291 and CVE-2026-127960 reach 8.1. Upgrade to 8.2 or later"
 sbom_php_rule: >-
   A package carries PHP code if its name matches sbom_php_regex, does not match sbom_php_skip_regex, and its
   version starts with the branch in its name followed by "." (php-8.5-soap 8.5.13-r1 counts; php-8.5-xdebug
@@ -131,7 +129,7 @@ php_dependents:                      # Chainguard packages that depend on PHP (a
 scanner_feeds:
   - https://packages.cgr.dev/chainguard/security.json
   - https://packages.wolfi.dev/os/security.json
-signature_verify:                    # DRAFT: this KB has no signature section; these are the earlier KBs' (php2shell, nginx2root), with the org regexp anchored. Also used to verify SBOMs in step 2a
+signature_verify:                    # KB step 2 and its linked article on verifying signatures, with the org regexp anchored; also used to verify SBOMs in step 2a
   public: >-
     cosign verify
     --certificate-oidc-issuer=https://token.actions.githubusercontent.com
@@ -143,7 +141,7 @@ signature_verify:                    # DRAFT: this KB has no signature section; 
     --certificate-identity-regexp="^https://issuer\.enforce\.dev/(${IMAGE_SYNCER}|${CUSTOM_IMAGE_BUILDER})$"
     cgr.dev/$ORG/IMAGE@DIGEST       # anchored: cosign otherwise matches the regexp anywhere in the subject
 support: https://support.chainguard.dev
-status_page: https://status.chainguard.dev
+status_page: https://status.chainguard.dev/incident/1130384   # this incident's page, as the KB links it
 ```
 
 ## Step 0: Preflight (read-only)
@@ -359,7 +357,7 @@ docker run --rm cgr.dev/chainguard/wolfi-base apk version -t "<installed>" "<fix
 Rate each finding from step 2 with the first rule that applies:
 
 1. **A package line** (from 2a or 2b). Map the name to its origin (`sbom_php_rule`), then:
-   - origin in `end_of_life`: `END OF LIFE`. No fixed build will ship; step 4 proposes the upgrade.
+   - origin in `end_of_life`: `END OF LIFE`. This release has no fixed php-8.1 build; step 4 proposes the upgrade.
    - origin in `fixed_versions`: `PATCHED` at or above the fixed version. Below it: `VULNERABLE`. Rate **every** package line: if `php-8.4` is fixed but `php-8.4-pdo` isn't, the image is `VULNERABLE`; name the package in the Action column.
    - in none of these (an origin newer than 8.6): `UNKNOWN`, with "not in this skill's data" in the Action column. Check the KB, or ask Support.
 2. **A `php-engine` line that no package line explains** (a PHP copied in, built from source or unpacked from a tarball): take the branch from the version (`php/8.4.27` is branch 8.4). Branch 8.1 or older: `END OF LIFE`. A branch in `upstream_fixed`: `PATCHED` at or above it, noted "by binary version"; below it, `VULNERABLE`. Any other branch, or no version on the line: `UNKNOWN`. The version is a valid test here because the fixes are PHP's own releases (fact 2), so this doesn't apply to a binary built from patched sources of your own.
@@ -394,7 +392,7 @@ Any entry below the fixed version is `VULNERABLE` (note "by lock"). Without a lo
 
 ## Step 3b: Check which CVEs apply (read-only)
 
-Do this for every image that isn't `PATCHED` or `NOT AFFECTED`. It doesn't change the status; it tells the user how urgent each image is and which stopgap in step 6 applies.
+Do this for every image that isn't `NOT AFFECTED`. It doesn't change the status; it tells the user how urgent each image is and which stopgap in step 6 applies. For a `PATCHED` image, only the explicit-setting check in item 2 applies: an explicit `On` overrides the fixed releases' default of off (KB step 6, GHSA-658j-r8rw-q6mx). List each one under Open items.
 
 1. **By what's installed.** Each CVE's `component` (in `cves`) and its branch decide whether it can apply. `where_the_code_is` maps the component to a package: a CVE whose component isn't installed is `not applicable` to that image (for example, the FPM CVEs on an image without `php-8.N-fpm`, or the SOAP CVEs on a FrankenPHP image). The `built_in` components apply wherever PHP runs. A CVE whose `branches` don't include the image's branch is `not applicable` too.
 2. **CVE-2026-115560 (session serializer mismatch).** It needs session upload progress on, a writer using the `php_binary` or `php_serialize` serializer and a reader of the same session store using `php` (PHP's advisory, GHSA-658j-r8rw-q6mx). Read the configuration from step 1 and from 2b (`config:`): look for `session.upload_progress.enabled` in `php.ini` and `conf.d/*.ini`, and in `php_admin_value`/`php_value` lines of FPM pool files. Report `on (explicitly set)`, `on (default for this version)` when nothing sets it on a vulnerable build (see `defaults`), or `off`. An explicit `On` keeps it on after the update too: point it out, and tell the user that every reader and writer of a session store it can reach must then use the same `session.serialize_handler`, because the fix doesn't enforce that across separate configurations (PHP's advisory). Also report any `session.serialize_handler` settings found.
@@ -419,7 +417,7 @@ To tell a mirror copy from the user's own build: a mirror copy has the same dige
 | PHP copied from a build stage | The copy keeps the version of the stage it came from; updating the final stage's base image doesn't change it. Propose bumping the **build stage** (its `FROM`, or its `apk add` pins) to a patched version, then rebuild with `--pull --no-cache` and verify with step 2b. |
 | Dockerfile or apko config with `apk add` of PHP packages | Raise or remove old pins and fail closed, for example `apk add --no-cache 'php-8.4>=8.4.28-r0' 'php-8.4-fpm>=8.4.28-r0'`. Raise **every** `php-8.4-*` subpackage it installs to the same version; a pin left on one extension keeps the image vulnerable. Rebuild with `--pull --no-cache`, then verify the result with steps 2b–3. For apko, regenerate the lockfile with `apko lock`; that moves **every** package, so show the whole lockfile diff for approval. If a policy blocks the new versions, tell the user to contact their org admin or Support; don't change policy yourself. |
 | Custom Assembly image | These rebuild automatically unless the configuration pins PHP package versions. If your chainctl has it, read the pins with `chainctl images overlays list --parent "$ORG" -o json` (packages under `.overlays[].config.contents.packages`; check the output's shape before relying on it). Otherwise ask the user to check the configuration in the Chainguard Console. Propose raising or removing the pins. Then verify the rebuilt image with steps 2–3. |
-| `php-8.1` (`end_of_life`) | No fix exists. Propose an upgrade plan to 8.2 or later, checking the application's compatibility; don't change anything automatically. |
+| `php-8.1` (`end_of_life`) | This release has no fixed php-8.1 build; PHP 8.1 is end of life upstream. Propose an upgrade plan to 8.2 or later, checking the application's compatibility; don't change anything automatically. |
 
 Group the plan by repository or cluster. For each item, show the file and line or the workload, the current and target references, and the exact command or diff. Ask for approval per item or per group.
 
@@ -445,6 +443,8 @@ If the user can't update yet, offer the stopgap that matches step 3b. **It doesn
 | CVE | Stopgap | What it leaves open |
 |---|---|---|
 | CVE-2026-115560 | Set `session.upload_progress.enabled=0` in every PHP configuration that can write to the affected session store (PHP's advisory and the KB): in `php.ini`, a `conf.d` file or the FPM pool, before request input is processed. Calling `ini_set()` from the application is too late. | The other 16 CVEs. After the update, an explicit `On` still turns it back on. |
+| CVE-2026-126714 | The same setting. PHP's advisory lists it as a temporary, partial measure (KB step 6). | Applications that store attacker-controlled session data themselves; the other 16 CVEs. |
+| CVE-2026-129291 | Set `catch_workers_output = no` in affected FPM pools (PHP's advisory, a temporary workaround). `php-8.N-fpm-config` sets it to `yes` (`defaults`). | The use-after-free itself; the other 16 CVEs. Running the FPM master as non-root, as the `-fpm` tags of the php image do by default, limits what an attacker gains but doesn't fix it. |
 
 ## Step 7: Apply approved changes and roll out
 
@@ -455,8 +455,9 @@ If the user can't update yet, offer the stopgap that matches step 3b. **It doesn
 ## Step 8: Re-verify and report
 
 1. Re-run the step 1 `kubectl` query and confirm every affected workload now runs a `PATCHED` digest (repeat steps 2–3 on the running `imageID`s, not just the manifests).
-2. Scanners: Chainguard's advisory data records these CVEs as fixed (`advisories`), and the feeds in `scanner_feeds` pick that up as they update; at the time of writing they listed none of the 17. Until they do, a scanner may show none of these CVEs on fixed and unfixed images alike, so a clean scan doesn't confirm a fix: steps 2–3 do. Once the feeds list them, refresh the scanner's database (for grype: `grype db update`) and rescan. If a scanner still flags one of these CVEs on an image step 3 rated `PATCHED`, confirm it reads a feed in `scanner_feeds`, and contact Support with the image digest and scanner version.
-3. Produce the final report.
+2. Re-run the explicit-setting check of step 3b item 2 on each image now `PATCHED`, and list any explicit `session.upload_progress.enabled = On` under Open items, with the `session.serialize_handler` settings found.
+3. Scanners: Chainguard's advisory data records these CVEs as fixed (`advisories`), and the feeds in `scanner_feeds` list them at the versions in `fixed_versions`. A scanner that reads these feeds should flag the older versions once its database is refreshed (for grype: `grype db update`); refresh it and rescan. A clean scan doesn't replace steps 2–3. If a scanner still flags one of these CVEs on an image step 3 rated `PATCHED`, confirm it reads a feed in `scanner_feeds`, and contact Support with the image digest and scanner version.
+4. Produce the final report.
 
 ### Report format
 
@@ -481,7 +482,7 @@ Statuses (from step 3, plus step 4's `WAITING ON CHAINGUARD`): `PATCHED`, `NOT A
 |---|---|
 | FrankenPHP's `FrankenPHP started` log shows a `php_version` from the previous release on a fixed image | Expected: that field is the PHP version FrankenPHP was compiled against (`frankenphp`); the `X-Powered-By` header and `php -v` show the running version. Decide from the `php-8.N-frankenphp` package (steps 2–3) |
 | `php` is fixed, but the image is still rated vulnerable | An extension or SAPI subpackage is still at the previous version: an `apk add` pin, a lockfile, or an image rebuilt before every subpackage was published. Raise the pin or take a newer digest (step 4) |
-| A scanner shows none of these CVEs, on fixed and unfixed images alike | The feeds don't list them yet (step 8); rely on steps 2–3 |
+| A scanner shows none of these CVEs on an image step 3 rated `VULNERABLE` | Stale scanner database, or a scanner that doesn't read `scanner_feeds` → refresh it (step 8); rely on steps 2–3 |
 | Scanner still reports the CVEs on a patched image | Stale scanner DB or wrong feed → refresh, confirm `scanner_feeds`; re-check the version with steps 2–3 |
 | `session.upload_progress.enabled` is still on after the update | An explicit setting in `php.ini`, `conf.d` or an FPM pool overrides the new default of off |
 | `php-8.1` has no fixed version | End of life upstream (`end_of_life`) → upgrade to 8.2 or later |
@@ -493,4 +494,4 @@ Statuses (from step 3, plus step 4's `WAITING ON CHAINGUARD`): `PATCHED`, `NOT A
 
 ## Escalation
 
-https://support.chainguard.dev. Include the image, tag and digest, the PHP package versions from step 2, and this report. Status updates: https://status.chainguard.dev.
+https://support.chainguard.dev. Include the image, tag and digest, the PHP package versions from step 2, and this report. Status updates: https://status.chainguard.dev/incident/1130384.
